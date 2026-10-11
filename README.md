@@ -1,6 +1,6 @@
 # Search Engine in Rust
 
-[![ci](https://github.com/YOURUSER/Search-Engine-In-Rust/actions/workflows/ci/badge.svg)](https://github.com/YOURUSER/Search-Engine-In-Rust/actions/workflows/ci)
+[![ci](https://github.com/Kurenaiiiii/Search-Engine-In-Rust/actions/workflows/ci/badge.svg)](https://github.com/Kurenaiiiii/Search-Engine-In-Rust/actions/workflows/ci)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 
 A from-scratch full-text search engine (a mini Lucene) in Rust: BM25 ranking,
