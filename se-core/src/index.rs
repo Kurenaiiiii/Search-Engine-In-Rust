@@ -280,7 +280,67 @@ impl Index {
         Ok(())
     }
 
-    /// Synchronous tiered merge (used by tests/benchmarks for determinism).
+    /// Tiered merge: merge the 4 smallest segments into one. Bounded memory
+    /// (only a few segments are copied), unlike [`Index::merge_all`].
+    /// Returns true when a merge happened.
+    pub fn merge_tier(&self) -> std::io::Result<bool> {
+        let _commit = self.commit.lock().unwrap();
+        self.fail_here(FailAt::MergeWrite)?;
+        let mut ids: Vec<(usize, u64)> = {
+            let inner = self.inner.read().unwrap();
+            if inner.segments.len() < 2 {
+                return Ok(false);
+            }
+            let mut v: Vec<(usize, u64)> = inner
+                .segments
+                .iter()
+                .map(|s| s.doc_count() as u64)
+                .enumerate()
+                .collect();
+            v.sort_by_key(|&(_, n)| n);
+            v.truncate(4.min(v.len()));
+            v
+        };
+        ids.sort_by_key(|&(i, _)| i);
+        let picked: Vec<usize> = ids.into_iter().map(|(i, _)| i).collect();
+        let (snapshot_segs, live) = {
+            let inner = self.inner.read().unwrap();
+            let segs: Vec<Segment> = picked
+                .iter()
+                .map(|&i| (*inner.segments[i]).clone())
+                .collect();
+            (segs, inner.live.clone())
+        };
+        let filtered: Vec<Segment> = snapshot_segs
+            .iter()
+            .map(|s| retain_live(s, &live))
+            .collect();
+        let seg_id = self.inner.read().unwrap().next_seg;
+        let merged = merge_segments(seg_id, &filtered);
+        let bytes = merged.encode();
+        let path = self.dir.join("segments").join(format!("seg_{seg_id}.dat"));
+        {
+            let mut f = File::create(&path)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?;
+        }
+        self.fail_here(FailAt::MergeCommit)?;
+        {
+            let mut inner = self.inner.write().unwrap();
+            let old_ids: HashSet<u64> = snapshot_segs.iter().map(|s| s.id).collect();
+            inner.segments.retain(|s| !old_ids.contains(&s.id));
+            inner.segments.push(Arc::new(merged));
+            inner.next_seg += 1;
+        }
+        self.write_manifest()?;
+        for s in &snapshot_segs {
+            let _ = fs::remove_file(self.dir.join("segments").join(format!("seg_{}.dat", s.id)));
+        }
+        Ok(true)
+    }
+
+    /// Merge every segment into one (used by tests and small indexes; for
+    /// large indexes prefer [`Index::merge_tier`], which bounds memory).
     pub fn merge_all(&self) -> std::io::Result<bool> {
         let _commit = self.commit.lock().unwrap();
         self.fail_here(FailAt::MergeWrite)?;
@@ -328,7 +388,7 @@ impl Index {
         }
         let me = std::sync::Arc::clone(self);
         let h = std::thread::spawn(move || {
-            let _ = me.merge_all();
+            let _ = me.merge_tier();
         });
         self.merges.lock().unwrap().push(h);
         true

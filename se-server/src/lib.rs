@@ -436,7 +436,7 @@ impl Server {
                 match parse_json(body).and_then(|j| jobj_to_fields(&j)) {
                     Ok(fields) => match self.index.add(fields) {
                         Ok(id) => {
-                            let _ = self.index.flush();
+                            let _ = self.index.flush_and_maybe_merge();
                             respond(stream, 200, "application/json", &format!("{{\"id\":{id}}}"));
                         }
                         Err(e) => {
@@ -498,7 +498,7 @@ impl Server {
                                     }
                                 }
                             }
-                            let _ = self.index.flush();
+                            let _ = self.index.flush_and_maybe_merge();
                             let list = ids
                                 .iter()
                                 .map(|i| i.to_string())
@@ -542,7 +542,7 @@ impl Server {
                         },
                         "DELETE" => match self.index.delete(id) {
                             Ok(true) => {
-                                let _ = self.index.flush();
+                                let _ = self.index.flush_and_maybe_merge();
                                 respond(stream, 200, "application/json", "{\"deleted\":true}");
                             }
                             Ok(false) => {
@@ -557,7 +557,7 @@ impl Server {
                         "PUT" => match parse_json(body).and_then(|j| jobj_to_fields(&j)) {
                             Ok(fields) => match self.index.update(id, fields) {
                                 Ok(Some(new_id)) => {
-                                    let _ = self.index.flush();
+                                    let _ = self.index.flush_and_maybe_merge();
                                     respond(
                                         stream,
                                         200,

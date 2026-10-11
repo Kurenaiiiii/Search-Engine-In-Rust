@@ -11,6 +11,7 @@ fn usage() -> ! {
   se-cli --dir <data> index <file.ndjson>     index documents (one JSON object per line)
   se-cli --dir <data> search <query> [--top-k N] [--scorer bm25|tfidf] [--json]
   se-cli --dir <data> stats
+  se-cli --dir <data> optimize                  merge all segments into one
   se-cli --dir <data> suggest <prefix> [--field body]
   se-cli --dir <data> bench --queries <file> [--iters 20]
   se-cli --dir <data> serve [--addr 127.0.0.1:3000]"
@@ -74,6 +75,24 @@ fn main() {
             cmd_search(&dir, q, top_k, scorer, json);
         }
         "stats" => cmd_stats(&dir),
+        "optimize" => {
+            let idx = open(&dir);
+            let t0 = std::time::Instant::now();
+            let mut rounds = 0u32;
+            while idx.stats().segments > 1
+                && idx.merge_tier().unwrap_or_else(|e| {
+                    eprintln!("merge error: {e}");
+                    std::process::exit(1);
+                })
+            {
+                rounds += 1;
+            }
+            println!(
+                "merged in {rounds} rounds, {:.1}s",
+                t0.elapsed().as_secs_f64()
+            );
+            cmd_stats(&dir);
+        }
         "suggest" => {
             let prefix = rest.get(1).unwrap_or_else(|| {
                 eprintln!("suggest needs a prefix argument");
