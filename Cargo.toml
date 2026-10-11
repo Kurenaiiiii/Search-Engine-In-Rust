@@ -1,5 +1,6 @@
 [workspace]
 members = ["se-core", "se-server", "se-cli"]
+exclude = ["bench/tantivy-bench"]
 resolver = "2"
 
 [workspace.package]

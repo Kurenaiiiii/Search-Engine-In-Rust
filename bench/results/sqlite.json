@@ -1,0 +1,92 @@
+{
+  "engine": "sqlite-fts5-bm25",
+  "docs": 100000,
+  "index_s": 11.097278118133545,
+  "index_bytes": 249135104,
+  "queries": [
+    {
+      "q": "history",
+      "fts": "history",
+      "hits": 10,
+      "us": 293.2548522949219,
+      "error": null
+    },
+    {
+      "q": "city river",
+      "fts": "city OR river",
+      "hits": 10,
+      "us": 207.1857452392578,
+      "error": null
+    },
+    {
+      "q": "king AND queen",
+      "fts": "king AND queen",
+      "hits": 10,
+      "us": 144.2432403564453,
+      "error": null
+    },
+    {
+      "q": "king OR queen",
+      "fts": "king OR queen",
+      "hits": 10,
+      "us": 87.97645568847656,
+      "error": null
+    },
+    {
+      "q": "\"united states\"",
+      "fts": "\"united states\"",
+      "hits": 10,
+      "us": 149.9652862548828,
+      "error": null
+    },
+    {
+      "q": "\"world war\"",
+      "fts": "\"world war\"",
+      "hits": 10,
+      "us": 140.4285430908203,
+      "error": null
+    },
+    {
+      "q": "hist*",
+      "fts": "hist*",
+      "hits": 10,
+      "us": 1821.756362915039,
+      "error": null
+    },
+    {
+      "q": "histroy~1",
+      "fts": "histroy",
+      "hits": 0,
+      "us": 44.58427429199219,
+      "error": null
+    },
+    {
+      "q": "title:history",
+      "fts": "{title} : history",
+      "hits": 10,
+      "us": 95.12901306152344,
+      "error": null
+    },
+    {
+      "q": "(king OR queen) AND england",
+      "fts": "(king OR queen) AND england",
+      "hits": 10,
+      "us": 182.62863159179688,
+      "error": null
+    },
+    {
+      "q": "NOT war",
+      "fts": "NOT OR war",
+      "hits": 0,
+      "us": 68.18771362304688,
+      "error": "fts5: syntax error near \"NOT\""
+    },
+    {
+      "q": "england",
+      "fts": "england",
+      "hits": 10,
+      "us": 61.03515625,
+      "error": null
+    }
+  ]
+}

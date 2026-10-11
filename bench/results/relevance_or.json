@@ -1,0 +1,7 @@
+{
+  "dataset": "BEIR-SciFact OR-variant (eval-time rewrite, engine unchanged)",
+  "queries": 300,
+  "empty_result_queries": 67,
+  "nDCG@10": 0.5144528383771527,
+  "Recall@100": 0.7010000000000001
+}

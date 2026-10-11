@@ -62,6 +62,21 @@ impl Index {
         fs::create_dir_all(dir)?;
         fs::create_dir_all(dir.join("segments"))?;
         let (segments, next_id, next_seg, wal_applied) = load_manifest(dir)?;
+        // recovery hygiene: segment files not referenced by the manifest are
+        // leftovers of crashed merges and are safe to delete.
+        if let Ok(live_ids) = live_segment_ids(&segments) {
+            if let Ok(entries) = fs::read_dir(dir.join("segments")) {
+                for e in entries.flatten() {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    if name.starts_with("seg_") && name.ends_with(".dat") {
+                        let id: Option<u64> = name[4..name.len() - 4].parse().ok();
+                        if id.map(|v| !live_ids.contains(&v)).unwrap_or(false) {
+                            let _ = fs::remove_file(e.path());
+                        }
+                    }
+                }
+            }
+        }
         let wal_path = dir.join("wal.log");
         let mut wal_len = 0u64;
         if wal_path.exists() {
@@ -496,6 +511,10 @@ fn apply_record(inner: &mut Inner, rec: &[u8], rebound: &mut Vec<(u32, BTreeMap<
         }
         _ => {}
     }
+}
+
+fn live_segment_ids(segments: &[Arc<Segment>]) -> std::io::Result<HashSet<u64>> {
+    Ok(segments.iter().map(|s| s.id).collect())
 }
 
 fn load_manifest(dir: &Path) -> std::io::Result<(Vec<Arc<Segment>>, u32, u64, u64)> {
