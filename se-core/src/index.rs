@@ -42,7 +42,7 @@ struct Inner {
     segments: Vec<Arc<Segment>>,
     buffer: Vec<(u32, BTreeMap<String, String>)>,
     live: HashSet<u32>,
-    stored: BTreeMap<u32, BTreeMap<String, String>>,
+    stored: Arc<BTreeMap<u32, BTreeMap<String, String>>>,
     next_id: u32,
     next_seg: u64,
     wal: File,
@@ -78,7 +78,7 @@ impl Index {
                 segments,
                 buffer: Vec::new(),
                 live: HashSet::new(),
-                stored: BTreeMap::new(),
+                stored: Arc::new(BTreeMap::new()),
                 next_id,
                 next_seg,
                 wal,
@@ -101,7 +101,7 @@ impl Index {
             }
             for (gid, fields) in seg_docs {
                 inner.live.insert(gid);
-                inner.stored.insert(gid, fields);
+                Arc::make_mut(&mut inner.stored).insert(gid, fields);
             }
             // next_id must exceed any seg doc
             let max_seg = inner
@@ -185,7 +185,7 @@ impl Index {
             inner.wal.write_all(&rec)?;
             inner.next_id = id + 1;
             inner.live.insert(id);
-            inner.stored.insert(id, fields.clone());
+            Arc::make_mut(&mut inner.stored).insert(id, fields.clone());
             inner.buffer.push((id, fields));
             id
         };
@@ -207,7 +207,7 @@ impl Index {
         rec.extend_from_slice(&payload);
         inner.wal.write_all(&rec)?;
         inner.live.remove(&id);
-        inner.stored.remove(&id);
+        Arc::make_mut(&mut inner.stored).remove(&id);
         inner.buffer.retain(|(g, _)| *g != id);
         Ok(true)
     }
@@ -424,7 +424,7 @@ impl Index {
         Snapshot {
             segments,
             live: inner.live.clone(),
-            stored: inner.stored.clone(),
+            stored: Arc::clone(&inner.stored),
             schema: inner.schema.clone(),
         }
     }
@@ -479,7 +479,7 @@ fn apply_record(inner: &mut Inner, rec: &[u8], rebound: &mut Vec<(u32, BTreeMap<
             }
             inner.next_id = inner.next_id.max(id + 1);
             inner.live.insert(id);
-            inner.stored.insert(id, m.clone());
+            Arc::make_mut(&mut inner.stored).insert(id, m.clone());
             // if doc already in a segment (replay after partial flush), keep
             // it in buffer too — harmless duplicate filtered by live set...
             // avoid double-index: only buffer if not in any segment
@@ -491,7 +491,7 @@ fn apply_record(inner: &mut Inner, rec: &[u8], rebound: &mut Vec<(u32, BTreeMap<
         2 => {
             let id = codec::decode_varint(rec, &mut pos).unwrap_or(0);
             inner.live.remove(&id);
-            inner.stored.remove(&id);
+            Arc::make_mut(&mut inner.stored).remove(&id);
             rebound.retain(|(g, _)| *g != id);
         }
         _ => {}

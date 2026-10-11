@@ -116,7 +116,7 @@ pub struct Snapshot {
     pub segments: Vec<std::sync::Arc<Segment>>,
     /// live (non-deleted) global doc ids
     pub live: HashSet<u32>,
-    pub stored: BTreeMap<u32, BTreeMap<String, String>>,
+    pub stored: std::sync::Arc<BTreeMap<u32, BTreeMap<String, String>>>,
     pub schema: Schema,
 }
 
@@ -859,7 +859,7 @@ mod tests {
         Snapshot {
             segments: vec![std::sync::Arc::new(seg)],
             live: [0, 1, 2].into_iter().collect(),
-            stored: BTreeMap::new(),
+            stored: std::sync::Arc::new(BTreeMap::new()),
             schema,
         }
     }
