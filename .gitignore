@@ -10,3 +10,5 @@ bench/results/se_data/
 bench/beir/
 bench/synth_rel/
 *.dat
+__pycache__/
+*.pyc

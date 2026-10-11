@@ -1,0 +1,14 @@
+services:
+  search:
+    build: .
+    image: search-engine-in-rust:0.1.0
+    ports:
+      - "3000:3000"
+    environment:
+      SE_TOKEN: ${SE_TOKEN:-}
+    volumes:
+      - se_data:/data
+    restart: unless-stopped
+
+volumes:
+  se_data:

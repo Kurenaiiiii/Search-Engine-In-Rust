@@ -1,0 +1,6 @@
+target/
+.git/
+bench/corpus.ndjson
+bench/results/se_data/
+bench/beir/
+.env

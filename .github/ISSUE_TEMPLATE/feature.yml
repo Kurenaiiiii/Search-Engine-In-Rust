@@ -1,0 +1,16 @@
+name: Feature request
+description: Propose an engine or API improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: Proposal
+      description: What should change, and why (query shapes, scale, use case)
+    validations:
+      required: true
+  - type: textarea
+    id: bench
+    attributes:
+      label: Benchmark impact
+      description: Which frozen benchmark would measure this, if any
