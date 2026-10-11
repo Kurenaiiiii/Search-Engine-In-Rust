@@ -1,6 +1,12 @@
-/target
 .env
 .env.*
 data/
 *.log
 .DS_Store
+target/
+bench/tantivy-bench/target/
+bench/corpus.ndjson
+bench/results/se_data/
+bench/beir/
+bench/synth_rel/
+*.dat
