@@ -5,9 +5,9 @@ use std::collections::{BTreeMap, HashMap};
 
 /// A small English stop-word list.
 pub const STOPWORDS: &[&str] = &[
-    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "if", "in", "into", "is",
-    "it", "no", "not", "of", "on", "or", "such", "that", "the", "their", "then", "there",
-    "these", "they", "this", "to", "was", "will", "with",
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "if", "in", "into", "is", "it",
+    "no", "not", "of", "on", "or", "such", "that", "the", "their", "then", "there", "these",
+    "they", "this", "to", "was", "will", "with",
 ];
 
 /// Per-field analyzer configuration.
@@ -20,13 +20,21 @@ pub struct Analyzer {
 
 impl Default for Analyzer {
     fn default() -> Self {
-        Self { lowercase: true, stopwords: true, stem: true }
+        Self {
+            lowercase: true,
+            stopwords: true,
+            stem: true,
+        }
     }
 }
 
 impl Analyzer {
     pub fn raw() -> Self {
-        Self { lowercase: true, stopwords: false, stem: false }
+        Self {
+            lowercase: true,
+            stopwords: false,
+            stem: false,
+        }
     }
 }
 
@@ -52,7 +60,10 @@ pub fn tokenize(text: &str) -> Vec<String> {
 
 /// Analyze text into indexed terms (positions collapsed).
 pub fn analyze(text: &str, cfg: &Analyzer) -> Vec<String> {
-    analyze_with_positions(text, cfg).into_iter().map(|(t, _)| t).collect()
+    analyze_with_positions(text, cfg)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect()
 }
 
 /// Analyze text into (term, position) pairs. Positions count every emitted
@@ -65,8 +76,7 @@ pub fn analyze_with_positions(text: &str, cfg: &Analyzer) -> Vec<(String, u32)> 
         if cur.is_empty() {
             return;
         }
-        let mut tok: String =
-            cur.chars().flat_map(|c| c.to_lowercase()).collect();
+        let mut tok: String = cur.chars().flat_map(|c| c.to_lowercase()).collect();
         cur.clear();
         if !cfg.lowercase {
             tok = tok.clone();
@@ -155,7 +165,7 @@ fn ends_cvc(w: &[char]) -> bool {
     if !is_consonant(w, n - 3) || is_consonant(w, n - 2) || !is_consonant(w, n - 1) {
         return false;
     }
-    matches!(w[n - 1], 'w' | 'x' | 'y') == false
+    !matches!(w[n - 1], 'w' | 'x' | 'y')
 }
 
 fn replace_suffix(s: &mut Vec<char>, from: &str, to: &str) -> bool {
@@ -178,10 +188,10 @@ pub fn stem(word: &str) -> String {
     let mut w: Vec<char> = word.chars().collect();
 
     // Step 1a
-    if replace_suffix(&mut w, "sses", "ss") {
-    } else if replace_suffix(&mut w, "ies", "i") {
-    } else if replace_suffix(&mut w, "ss", "ss") {
-    } else if replace_suffix(&mut w, "s", "") {
+    for (a, b) in [("sses", "ss"), ("ies", "i"), ("ss", "ss"), ("s", "")] {
+        if replace_suffix(&mut w, a, b) {
+            break;
+        }
     }
     // Step 1b
     let mut flag = false;
@@ -192,7 +202,11 @@ pub fn stem(word: &str) -> String {
     } else if (w.windows(2).any(|p| p == ['e', 'd']) && w.ends_with(&['e', 'd']))
         || (w.windows(3).any(|p| p == ['i', 'n', 'g']) && ends_with(&w, "ing"))
     {
-        let suf = if w.ends_with(&['e', 'd']) { "ed" } else { "ing" };
+        let suf = if w.ends_with(&['e', 'd']) {
+            "ed"
+        } else {
+            "ing"
+        };
         let stem_part: Vec<char> = w[..w.len() - suf.len()].to_vec();
         if has_vowel(&stem_part) {
             w = stem_part;
@@ -212,7 +226,7 @@ pub fn stem(word: &str) -> String {
     }
     if flag || has_vowel(&w) {
         // Step 1c
-        if w.ends_with(&['y']) && has_vowel(&w[..w.len() - 1].to_vec()) {
+        if w.ends_with(&['y']) && has_vowel(&w[..w.len() - 1]) {
             w.pop();
             w.push('i');
         }
@@ -343,7 +357,10 @@ mod tests {
 
     #[test]
     fn tokenizer_splits_unicode() {
-        assert_eq!(tokenize("Hello,  world! 123"), vec!["hello", "world", "123"]);
+        assert_eq!(
+            tokenize("Hello,  world! 123"),
+            vec!["hello", "world", "123"]
+        );
         assert_eq!(tokenize("crème brûlée"), vec!["crème", "brûlée"]);
         assert_eq!(tokenize(""), Vec::<String>::new());
         assert_eq!(tokenize("a-b_c"), vec!["a", "b", "c"]);

@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "se_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "se-server"
 path = "src/main.rs"

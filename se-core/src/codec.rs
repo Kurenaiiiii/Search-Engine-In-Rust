@@ -105,7 +105,11 @@ pub fn decode_postings(buf: &[u8]) -> Option<Vec<Posting>> {
             positions.push(p);
             prev_pos = p;
         }
-        out.push(Posting { doc: prev_doc, freq, positions });
+        out.push(Posting {
+            doc: prev_doc,
+            freq,
+            positions,
+        });
     }
     Some(out)
 }
@@ -128,7 +132,11 @@ pub fn build_skips(postings: &[Posting], encoded: &[u8], every: usize) -> Vec<Sk
     let mut prev_doc = 0u32;
     for (i, p) in postings.iter().enumerate() {
         if i % every == 0 {
-            skips.push(SkipEntry { index: i, byte_offset: pos, doc: p.doc });
+            skips.push(SkipEntry {
+                index: i,
+                byte_offset: pos,
+                doc: p.doc,
+            });
         }
         // advance pos past this posting: re-encode single posting and skip
         let mut tmp = Vec::new();
@@ -212,9 +220,21 @@ mod tests {
     #[test]
     fn postings_roundtrip() {
         let ps = vec![
-            Posting { doc: 1, freq: 2, positions: vec![0, 5] },
-            Posting { doc: 7, freq: 1, positions: vec![3] },
-            Posting { doc: 100, freq: 3, positions: vec![0, 1, 9] },
+            Posting {
+                doc: 1,
+                freq: 2,
+                positions: vec![0, 5],
+            },
+            Posting {
+                doc: 7,
+                freq: 1,
+                positions: vec![3],
+            },
+            Posting {
+                doc: 100,
+                freq: 3,
+                positions: vec![0, 1, 9],
+            },
         ];
         let enc = encode_postings(&ps);
         assert_eq!(decode_postings(&enc).unwrap(), ps);
@@ -222,12 +242,24 @@ mod tests {
 
     #[test]
     fn skips_cover_list() {
-        let ps: Vec<Posting> =
-            (0..20).map(|i| Posting { doc: i, freq: 1, positions: vec![0] }).collect();
+        let ps: Vec<Posting> = (0..20)
+            .map(|i| Posting {
+                doc: i,
+                freq: 1,
+                positions: vec![0],
+            })
+            .collect();
         let enc = encode_postings(&ps);
         let skips = build_skips(&ps, &enc, 8);
         assert_eq!(skips.len(), 3);
-        assert_eq!(skips[0], SkipEntry { index: 0, byte_offset: 0, doc: 0 });
+        assert_eq!(
+            skips[0],
+            SkipEntry {
+                index: 0,
+                byte_offset: 0,
+                doc: 0
+            }
+        );
         // every skip entry must point at the right posting: doc ids decoded
         // from the full list match the recorded absolute doc
         let ids: Vec<u32> = ps.iter().map(|p| p.doc).collect();

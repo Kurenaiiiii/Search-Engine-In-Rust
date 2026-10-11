@@ -17,7 +17,11 @@ pub struct Brute {
 
 impl Brute {
     pub fn new(schema: Schema) -> Self {
-        Self { docs: BTreeMap::new(), schema, next_id: 0 }
+        Self {
+            docs: BTreeMap::new(),
+            schema,
+            next_id: 0,
+        }
     }
     pub fn add(&mut self, fields: BTreeMap<String, String>) -> u32 {
         let id = self.next_id;
@@ -56,7 +60,9 @@ impl Brute {
         self.docs
             .values()
             .filter(|d| {
-                d.get(field).map(|t| self.terms(field, t).contains(&term.to_string())).unwrap_or(false)
+                d.get(field)
+                    .map(|t| self.terms(field, t).contains(&term.to_string()))
+                    .unwrap_or(false)
             })
             .count() as u64
     }
@@ -64,12 +70,21 @@ impl Brute {
         if self.docs.is_empty() {
             return 0.0;
         }
-        let sum: usize =
-            self.docs.values().map(|d| d.get(field).map(|t| self.terms(field, t).len()).unwrap_or(0)).sum();
+        let sum: usize = self
+            .docs
+            .values()
+            .map(|d| {
+                d.get(field)
+                    .map(|t| self.terms(field, t).len())
+                    .unwrap_or(0)
+            })
+            .sum();
         sum as f64 / self.docs.len() as f64
     }
     fn doc_len(&self, doc: &BTreeMap<String, String>, field: &str) -> f32 {
-        doc.get(field).map(|t| self.terms(field, t).len()).unwrap_or(0) as f32
+        doc.get(field)
+            .map(|t| self.terms(field, t).len())
+            .unwrap_or(0) as f32
     }
     fn weight(&self, tf: f32, dl: f32, avg: f64, df: u64, n: u64, scorer: &Scorer) -> f32 {
         match scorer {
@@ -78,19 +93,32 @@ impl Brute {
         }
     }
     fn boost(&self, opts: &SearchOptions, field: &str) -> f32 {
-        opts.field_boosts.get(field).copied().unwrap_or_else(|| self.schema.boost_for(field))
+        opts.field_boosts
+            .get(field)
+            .copied()
+            .unwrap_or_else(|| self.schema.boost_for(field))
     }
 
-    fn eval(&self, id: u32, doc: &BTreeMap<String, String>, q: &Query, opts: &SearchOptions, n: u64) -> Option<f32> {
+    fn eval(
+        &self,
+        doc: &BTreeMap<String, String>,
+        q: &Query,
+        opts: &SearchOptions,
+        n: u64,
+    ) -> Option<f32> {
         match q {
             Query::MatchAll => Some(1.0),
             Query::Not(inner) => {
-                if self.eval(id, doc, inner, opts, n).is_some() { None } else { Some(1.0) }
+                if self.eval(doc, inner, opts, n).is_some() {
+                    None
+                } else {
+                    Some(1.0)
+                }
             }
             Query::And(parts) => {
                 let mut s = 0.0;
                 for p in parts {
-                    s += self.eval(id, doc, p, opts, n)?;
+                    s += self.eval(doc, p, opts, n)?;
                 }
                 Some(s)
             }
@@ -98,37 +126,58 @@ impl Brute {
                 let mut s = 0.0;
                 let mut any = false;
                 for p in parts {
-                    if let Some(v) = self.eval(id, doc, p, opts, n) {
+                    if let Some(v) = self.eval(doc, p, opts, n) {
                         s += v;
                         any = true;
                     }
                 }
-                if any { Some(s) } else { None }
+                if any {
+                    Some(s)
+                } else {
+                    None
+                }
             }
             Query::Term { field, term, boost } => {
                 let mut s = 0.0;
                 let mut any = false;
                 for f in self.fields_of(field, opts) {
                     let ana = crate::analysis::analyze(term, self.schema.analyzer_for(&f));
-                    let Some(qt) = ana.into_iter().next() else { continue };
+                    let Some(qt) = ana.into_iter().next() else {
+                        continue;
+                    };
                     let toks = doc.get(&f).map(|t| self.terms(&f, t)).unwrap_or_default();
                     let tf = toks.iter().filter(|t| **t == qt).count() as f32;
                     if tf > 0.0 {
-                        s += self.weight(tf, self.doc_len(doc, &f), self.avg_len(&f), self.df(&f, &qt).max(1), n, &opts.scorer)
-                            * boost
+                        s += self.weight(
+                            tf,
+                            self.doc_len(doc, &f),
+                            self.avg_len(&f),
+                            self.df(&f, &qt).max(1),
+                            n,
+                            &opts.scorer,
+                        ) * boost
                             * self.boost(opts, &f);
                         any = true;
                     }
                 }
-                if any { Some(s) } else { None }
+                if any {
+                    Some(s)
+                } else {
+                    None
+                }
             }
-            Query::Prefix { field, prefix, boost } => {
+            Query::Prefix {
+                field,
+                prefix,
+                boost,
+            } => {
                 let mut s = 0.0;
                 let mut any = false;
                 for f in self.fields_of(field, opts) {
                     let p = prefix.to_lowercase();
                     let toks = doc.get(&f).map(|t| self.terms(&f, t)).unwrap_or_default();
-                    let mut uniq: Vec<String> = toks.into_iter().filter(|t| t.starts_with(&p)).collect();
+                    let mut uniq: Vec<String> =
+                        toks.into_iter().filter(|t| t.starts_with(&p)).collect();
                     uniq.sort();
                     uniq.dedup();
                     for qt in uniq {
@@ -136,15 +185,30 @@ impl Brute {
                             .get(&f)
                             .map(|t| self.terms(&f, t).iter().filter(|t| **t == qt).count() as f32)
                             .unwrap_or(0.0);
-                        s += self.weight(tf, self.doc_len(doc, &f), self.avg_len(&f), self.df(&f, &qt).max(1), n, &opts.scorer)
-                            * boost
+                        s += self.weight(
+                            tf,
+                            self.doc_len(doc, &f),
+                            self.avg_len(&f),
+                            self.df(&f, &qt).max(1),
+                            n,
+                            &opts.scorer,
+                        ) * boost
                             * self.boost(opts, &f);
                         any = true;
                     }
                 }
-                if any { Some(s) } else { None }
+                if any {
+                    Some(s)
+                } else {
+                    None
+                }
             }
-            Query::Fuzzy { field, term, dist, boost } => {
+            Query::Fuzzy {
+                field,
+                term,
+                dist,
+                boost,
+            } => {
                 let mut s = 0.0;
                 let mut any = false;
                 for f in self.fields_of(field, opts) {
@@ -163,8 +227,10 @@ impl Brute {
                             }
                         }
                     }
-                    let mut cands: Vec<String> =
-                        dict.into_iter().filter(|t| edit_distance(&q, t, *dist) <= *dist).collect();
+                    let mut cands: Vec<String> = dict
+                        .into_iter()
+                        .filter(|t| edit_distance(&q, t, *dist) <= *dist)
+                        .collect();
                     cands.sort();
                     for qt in cands {
                         let tf = doc
@@ -172,40 +238,69 @@ impl Brute {
                             .map(|t| self.terms(&f, t).iter().filter(|t| **t == qt).count() as f32)
                             .unwrap_or(0.0);
                         if tf > 0.0 {
-                            s += self.weight(tf, self.doc_len(doc, &f), self.avg_len(&f), self.df(&f, &qt).max(1), n, &opts.scorer)
-                                * boost
+                            s += self.weight(
+                                tf,
+                                self.doc_len(doc, &f),
+                                self.avg_len(&f),
+                                self.df(&f, &qt).max(1),
+                                n,
+                                &opts.scorer,
+                            ) * boost
                                 * self.boost(opts, &f);
                             any = true;
                         }
                     }
                 }
-                if any { Some(s) } else { None }
+                if any {
+                    Some(s)
+                } else {
+                    None
+                }
             }
-            Query::Phrase { field, terms, boost } => {
+            Query::Phrase {
+                field,
+                terms,
+                boost,
+            } => {
                 let mut s = 0.0;
                 let mut any = false;
                 for f in self.fields_of(field, opts) {
-                    let toks = doc.get(&f).map(|t| self.terms_pos(&f, t)).unwrap_or_default();
+                    let toks = doc
+                        .get(&f)
+                        .map(|t| self.terms_pos(&f, t))
+                        .unwrap_or_default();
                     // df = docs containing the phrase
                     let mut dfp = 0u64;
                     for d in self.docs.values() {
                         if let Some(t) = d.get(&f) {
-                            let seq: Vec<String> =
-                                self.terms(&f, t);
+                            let seq: Vec<String> = self.terms(&f, t);
                             if contains_phrase(&seq, terms) {
                                 dfp += 1;
                             }
                         }
                     }
-                    let occ = count_phrase(&toks.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>(), terms);
+                    let occ = count_phrase(
+                        &toks.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>(),
+                        terms,
+                    );
                     if occ > 0 {
-                        s += self.weight(occ as f32, self.doc_len(doc, &f), self.avg_len(&f), dfp.max(1), n, &opts.scorer)
-                            * boost
+                        s += self.weight(
+                            occ as f32,
+                            self.doc_len(doc, &f),
+                            self.avg_len(&f),
+                            dfp.max(1),
+                            n,
+                            &opts.scorer,
+                        ) * boost
                             * self.boost(opts, &f);
                         any = true;
                     }
                 }
-                if any { Some(s) } else { None }
+                if any {
+                    Some(s)
+                } else {
+                    None
+                }
             }
         }
     }
@@ -214,12 +309,15 @@ impl Brute {
         let n = (self.docs.len() as u64).max(1);
         let mut hits = Vec::new();
         for (&id, doc) in &self.docs {
-            if let Some(score) = self.eval(id, doc, q, opts, n) {
+            if let Some(score) = self.eval(doc, q, opts, n) {
                 hits.push(Hit { doc: id, score });
             }
         }
         hits.sort_by(|a, b| {
-            b.score.partial_cmp(&a.score).unwrap().then_with(|| a.doc.cmp(&b.doc))
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap()
+                .then_with(|| a.doc.cmp(&b.doc))
         });
         hits.truncate(opts.top_k.max(1));
         hits
@@ -237,14 +335,16 @@ fn count_phrase(seq: &[String], phrase: &[String]) -> usize {
     if phrase.is_empty() || seq.len() < phrase.len() {
         return 0;
     }
-    (0..=seq.len() - phrase.len()).filter(|&i| seq[i..i + phrase.len()] == *phrase).count()
+    (0..=seq.len() - phrase.len())
+        .filter(|&i| seq[i..i + phrase.len()] == *phrase)
+        .count()
 }
 
 /// Deterministic xorshift RNG for property tests (no dev-dependencies).
 pub struct Rng(pub u64);
 
 impl Rng {
-    pub fn next(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         let mut x = self.0;
         x ^= x << 13;
         x ^= x >> 7;
@@ -253,7 +353,7 @@ impl Rng {
         x
     }
     pub fn below(&mut self, n: usize) -> usize {
-        (self.next() % (n as u64).max(1)) as usize
+        (self.next_u64() % (n as u64).max(1)) as usize
     }
     pub fn pick<'a>(&mut self, xs: &'a [&'a str]) -> &'a str {
         xs[self.below(xs.len())]

@@ -10,6 +10,9 @@ use crate::codec::{self, Posting, SkipEntry};
 pub const SKIP_EVERY: usize = 8;
 const DICT_BLOCK: usize = 16;
 
+/// (field, term) -> local doc -> (freq, positions)
+pub type InvMap = BTreeMap<(String, String), BTreeMap<u32, (u32, Vec<u32>)>>;
+
 /// Front-coded term dictionary: sorted keys compressed with shared-prefix
 /// coding, in blocks with a sparse index for binary search.
 #[derive(Debug, Clone, Default)]
@@ -49,17 +52,19 @@ impl TermDict {
                 prev = k.clone();
             }
         }
-        Self { bytes, index, len: keys.len() }
+        Self {
+            bytes,
+            index,
+            len: keys.len(),
+        }
     }
 
     fn decode_block(&self, off: usize) -> Vec<(String, usize)> {
-        // returns (key, offset_of_entry) pairs for one block
+        // returns (key, offset_of_entry) pairs for one block; the first
+        // entry of a block is stored whole (prefix relative to "")
         let mut out = Vec::new();
         let mut pos = off;
-        let mut prev = if out.is_empty() { String::new() } else { String::new() };
-        // find block base: previous key state resets per block
-        prev.clear();
-        // first entry of block has prefix relative to ""
+        let mut prev = String::new();
         let mut first = true;
         for _ in 0..DICT_BLOCK {
             if pos >= self.bytes.len() {
@@ -73,12 +78,14 @@ impl TermDict {
             }
             let suf = &self.bytes[pos..pos + s];
             pos += s;
-            let base: Vec<u8> =
-                if first { Vec::new() } else { prev.as_bytes()[..p.min(prev.len())].to_vec() };
+            let base: Vec<u8> = if first {
+                Vec::new()
+            } else {
+                prev.as_bytes()[..p.min(prev.len())].to_vec()
+            };
             let mut key = base;
             key.extend_from_slice(suf);
             let ks = String::from_utf8(key).unwrap_or_default();
-            let _ = first;
             first = false;
             prev = ks.clone();
             out.push((ks, entry_off));
@@ -116,12 +123,17 @@ impl TermDict {
                 hi = mid;
             }
         }
-        self.decode_block(self.index[lo].1).iter().any(|(k, _)| k == key)
+        self.decode_block(self.index[lo].1)
+            .iter()
+            .any(|(k, _)| k == key)
     }
 
     /// All keys with the given prefix (prefix includes "field\x00" part).
     pub fn scan_prefix(&self, prefix: &str) -> Vec<String> {
-        self.all_keys().into_iter().filter(|k| k.starts_with(prefix)).collect()
+        self.all_keys()
+            .into_iter()
+            .filter(|k| k.starts_with(prefix))
+            .collect()
     }
 }
 
@@ -129,6 +141,10 @@ impl TermDict {
 pub fn dict_key(field: &str, term: &str) -> String {
     format!("{field}\0{term}")
 }
+
+/// Stored document fields and per-field token counts.
+pub type StoredDoc = BTreeMap<String, String>;
+pub type FieldLens = BTreeMap<String, u32>;
 
 /// An immutable segment: postings keyed by (field, term) with local doc ids.
 #[derive(Debug, Clone, Default)]
@@ -152,10 +168,14 @@ impl Segment {
         self.postings.len()
     }
     pub fn postings_for(&self, field: &str, term: &str) -> Option<&[Posting]> {
-        self.postings.get(&(field.to_string(), term.to_string())).map(|v| v.as_slice())
+        self.postings
+            .get(&(field.to_string(), term.to_string()))
+            .map(|v| v.as_slice())
     }
     pub fn skips_for(&self, field: &str, term: &str) -> Option<&[SkipEntry]> {
-        self.skips.get(&(field.to_string(), term.to_string())).map(|v| v.as_slice())
+        self.skips
+            .get(&(field.to_string(), term.to_string()))
+            .map(|v| v.as_slice())
     }
     /// Terms of a field starting with `prefix` (uses the front-coded dict).
     pub fn prefix_terms(&self, field: &str, prefix: &str) -> Vec<String> {
@@ -173,8 +193,11 @@ impl Segment {
         if self.field_lens.is_empty() {
             return 0.0;
         }
-        let sum: u64 =
-            self.field_lens.iter().map(|m| m.get(field).copied().unwrap_or(0) as u64).sum();
+        let sum: u64 = self
+            .field_lens
+            .iter()
+            .map(|m| m.get(field).copied().unwrap_or(0) as u64)
+            .sum();
         sum as f64 / self.field_lens.len() as f64
     }
     /// df of a term within this segment.
@@ -258,10 +281,7 @@ impl Segment {
                 let kb = read(buf, &mut pos, kl)?;
                 let vl = codec::decode_varint(buf, &mut pos)? as usize;
                 let vb = read(buf, &mut pos, vl)?;
-                m.insert(
-                    String::from_utf8(kb).ok()?,
-                    String::from_utf8(vb).ok()?,
-                );
+                m.insert(String::from_utf8(kb).ok()?, String::from_utf8(vb).ok()?);
             }
             stored.push(m);
         }
@@ -309,13 +329,13 @@ impl Segment {
     }
 
     pub fn rebuild_aux(&mut self) {
-        let keys: Vec<String> =
-            self.postings.keys().map(|(f, t)| dict_key(f, t)).collect();
+        let keys: Vec<String> = self.postings.keys().map(|(f, t)| dict_key(f, t)).collect();
         self.dict = TermDict::build(keys);
         self.skips.clear();
         for (k, plist) in &self.postings {
             let enc = self.compressed.get(k).cloned().unwrap_or_default();
-            self.skips.insert(k.clone(), codec::build_skips(plist, &enc, SKIP_EVERY));
+            self.skips
+                .insert(k.clone(), codec::build_skips(plist, &enc, SKIP_EVERY));
         }
     }
 }
@@ -327,16 +347,11 @@ pub struct SegmentWriter {
     pub stored: Vec<BTreeMap<String, String>>,
     pub field_lens: Vec<BTreeMap<String, u32>>,
     // (field, term) -> local doc idx -> (freq, positions)
-    pub inv: BTreeMap<(String, String), BTreeMap<u32, (u32, Vec<u32>)>>,
+    pub inv: InvMap,
 }
 
 impl SegmentWriter {
-    pub fn add_doc(
-        &mut self,
-        global_id: u32,
-        fields: &BTreeMap<String, String>,
-        schema: &Schema,
-    ) {
+    pub fn add_doc(&mut self, global_id: u32, fields: &BTreeMap<String, String>, schema: &Schema) {
         let local = self.docs.len() as u32;
         self.docs.push(global_id);
         self.stored.push(fields.clone());
@@ -345,7 +360,10 @@ impl SegmentWriter {
             let terms = schema.field_terms(f, text);
             lens.insert(f.clone(), terms.values().map(|(c, _)| *c).sum::<u32>());
             for (tok, (freq, positions)) in terms {
-                self.inv.entry((f.clone(), tok)).or_default().insert(local, (freq, positions));
+                self.inv
+                    .entry((f.clone(), tok))
+                    .or_default()
+                    .insert(local, (freq, positions));
             }
         }
         self.field_lens.push(lens);
@@ -393,7 +411,7 @@ impl SegmentWriter {
 pub fn merge_segments(id: u64, segs: &[Segment]) -> Segment {
     let mut w = SegmentWriter::default();
     // global order kept sorted for delta compression wins
-    let mut all: Vec<(u32, BTreeMap<String, String>, BTreeMap<String, u32>)> = Vec::new();
+    let mut all: Vec<(u32, StoredDoc, FieldLens)> = Vec::new();
     for s in segs {
         for (i, gid) in s.docs.iter().enumerate() {
             all.push((*gid, s.stored[i].clone(), s.field_lens[i].clone()));
@@ -401,7 +419,7 @@ pub fn merge_segments(id: u64, segs: &[Segment]) -> Segment {
     }
     all.sort_by_key(|(g, _, _)| *g);
     // rebuild inverted index from stored docs is wasteful; remap directly
-    let mut inv: BTreeMap<(String, String), BTreeMap<u32, (u32, Vec<u32>)>> = BTreeMap::new();
+    let mut inv: InvMap = BTreeMap::new();
     for (new_local, (gid, stored, lens)) in all.iter().enumerate() {
         let nl = new_local as u32;
         w.docs.push(*gid);
@@ -463,7 +481,9 @@ mod tests {
         assert_eq!(seg.df("body", "rust"), 2);
         assert_eq!(seg.postings_for("body", "nope"), None);
         // prefix scan
-        assert!(seg.prefix_terms("body", "eng").contains(&"engin".to_string()));
+        assert!(seg
+            .prefix_terms("body", "eng")
+            .contains(&"engin".to_string()));
     }
 
     #[test]

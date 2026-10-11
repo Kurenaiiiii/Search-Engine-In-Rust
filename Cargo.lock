@@ -7,6 +7,7 @@ name = "se-cli"
 version = "0.1.0"
 dependencies = [
  "se-core",
+ "se-server",
 ]
 
 [[package]]

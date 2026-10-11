@@ -12,4 +12,4 @@ pub mod segment;
 pub use analysis::{Analyzer, Schema};
 pub use index::{Index, Stats};
 pub use query::{parse, Query};
-pub use search::{Hit, SearchOptions, Scorer};
+pub use search::{Hit, Scorer, SearchOptions};

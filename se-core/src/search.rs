@@ -32,10 +32,16 @@ pub struct SearchOptions {
 
 impl SearchOptions {
     pub fn top(k: usize) -> Self {
-        Self { top_k: k, ..Default::default() }
+        Self {
+            top_k: k,
+            ..Default::default()
+        }
     }
     pub fn field_boost(&self, schema: &Schema, field: &str) -> f32 {
-        self.field_boosts.get(field).copied().unwrap_or_else(|| schema.boost_for(field))
+        self.field_boosts
+            .get(field)
+            .copied()
+            .unwrap_or_else(|| schema.boost_for(field))
     }
 }
 
@@ -68,7 +74,7 @@ pub fn edit_distance(a: &str, b: &str, cap: u32) -> u32 {
     if b.is_empty() {
         return (a.len() as u32).min(cap + 1);
     }
-    if (a.len() as i64 - b.len() as i64).abs() as u32 > cap {
+    if a.len().abs_diff(b.len()) as u32 > cap {
         return cap + 1;
     }
     let mut prev: Vec<u32> = (0..=b.len() as u32).collect();
@@ -77,7 +83,9 @@ pub fn edit_distance(a: &str, b: &str, cap: u32) -> u32 {
         cur[0] = i as u32 + 1;
         let mut row_min = cur[0];
         for (j, &cb) in b.iter().enumerate() {
-            cur[j + 1] = (prev[j] + u32::from(ca != cb)).min(prev[j + 1] + 1).min(cur[j] + 1);
+            cur[j + 1] = (prev[j] + u32::from(ca != cb))
+                .min(prev[j + 1] + 1)
+                .min(cur[j] + 1);
             row_min = row_min.min(cur[j + 1]);
         }
         if row_min > cap {
@@ -138,16 +146,28 @@ impl Snapshot {
         for s in &self.segments {
             for (i, gid) in s.docs.iter().enumerate() {
                 if self.live.contains(gid) {
-                    sum += s.field_lens.get(i).and_then(|m| m.get(field)).copied().unwrap_or(0)
-                        as u64;
+                    sum += s
+                        .field_lens
+                        .get(i)
+                        .and_then(|m| m.get(field))
+                        .copied()
+                        .unwrap_or(0) as u64;
                     n += 1;
                 }
             }
         }
-        if n == 0 { 0.0 } else { sum as f64 / n as f64 }
+        if n == 0 {
+            0.0
+        } else {
+            sum as f64 / n as f64
+        }
     }
     pub fn doc_field_len(&self, seg: &Segment, local: u32, field: &str) -> f32 {
-        seg.field_lens.get(local as usize).and_then(|m| m.get(field)).copied().unwrap_or(0) as f32
+        seg.field_lens
+            .get(local as usize)
+            .and_then(|m| m.get(field))
+            .copied()
+            .unwrap_or(0) as f32
     }
     pub fn all_dict_terms(&self, field: &str) -> Vec<(String, u64)> {
         let mut df: HashMap<String, u64> = HashMap::new();
@@ -213,7 +233,11 @@ fn expand_term(
                 }
             }
             "fuzzy" => {
-                let q = if cfg.stem { stem(&raw.to_lowercase()) } else { raw.to_lowercase() };
+                let q = if cfg.stem {
+                    stem(&raw.to_lowercase())
+                } else {
+                    raw.to_lowercase()
+                };
                 for s in &snap.segments {
                     for t in s.all_field_terms(&f) {
                         if edit_distance(&q, &t, dist) <= dist {
@@ -231,14 +255,7 @@ fn expand_term(
 }
 
 /// Score one (field, term) posting against shared collection stats.
-fn term_score(
-    tf: f32,
-    doc_len: f32,
-    avg_len: f64,
-    df: u64,
-    n: u64,
-    scorer: &Scorer,
-) -> f32 {
+fn term_score(tf: f32, doc_len: f32, avg_len: f64, df: u64, n: u64, scorer: &Scorer) -> f32 {
     match scorer {
         Scorer::Bm25 { k1, b } => bm25(tf, doc_len, avg_len as f32, df, n, *k1, *b),
         Scorer::Tfidf => tfidf(tf, df, n),
@@ -287,8 +304,9 @@ fn eval_segment(
             }
             let mut acc: Option<HashMap<u32, f32>> = None;
             for p in parts {
-                let m: HashMap<u32, f32> =
-                    eval_segment(seg, snap, p, schema, opts, n, avg_cache).into_iter().collect();
+                let m: HashMap<u32, f32> = eval_segment(seg, snap, p, schema, opts, n, avg_cache)
+                    .into_iter()
+                    .collect();
                 acc = Some(match acc {
                     None => m,
                     Some(a) => {
@@ -317,22 +335,53 @@ fn eval_segment(
             }
             acc.into_iter().collect()
         }
-        Query::Term { field, term, boost } => {
-            score_clauses(seg, snap, schema, opts, n, avg_cache, &expand_clauses(
+        Query::Term { field, term, boost } => score_clauses(
+            seg,
+            snap,
+            schema,
+            opts,
+            n,
+            avg_cache,
+            &expand_clauses(
                 snap, schema, opts, field, "term", term, 0, *boost, n, avg_cache,
-            ))
-        }
-        Query::Prefix { field, prefix, boost } => {
-            score_clauses(seg, snap, schema, opts, n, avg_cache, &expand_clauses(
+            ),
+        ),
+        Query::Prefix {
+            field,
+            prefix,
+            boost,
+        } => score_clauses(
+            seg,
+            snap,
+            schema,
+            opts,
+            n,
+            avg_cache,
+            &expand_clauses(
                 snap, schema, opts, field, "prefix", prefix, 0, *boost, n, avg_cache,
-            ))
-        }
-        Query::Fuzzy { field, term, dist, boost } => {
-            score_clauses(seg, snap, schema, opts, n, avg_cache, &expand_clauses(
+            ),
+        ),
+        Query::Fuzzy {
+            field,
+            term,
+            dist,
+            boost,
+        } => score_clauses(
+            seg,
+            snap,
+            schema,
+            opts,
+            n,
+            avg_cache,
+            &expand_clauses(
                 snap, schema, opts, field, "fuzzy", term, *dist, *boost, n, avg_cache,
-            ))
-        }
-        Query::Phrase { field, terms, boost } => {
+            ),
+        ),
+        Query::Phrase {
+            field,
+            terms,
+            boost,
+        } => {
             let mut acc: HashMap<u32, f32> = HashMap::new();
             for f in resolve_fields(field, snap, opts) {
                 let df_phrase = phrase_df(snap, &f, terms);
@@ -388,6 +437,7 @@ fn eval_segment(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn expand_clauses(
     snap: &Snapshot,
     schema: &Schema,
@@ -405,9 +455,15 @@ fn expand_clauses(
         let df = snap.df(&f, &t).max(1);
         let avg = avg_cache.get(&f).copied().unwrap_or(0.0);
         // optimistic max: tf=10 at avg length
-        let max_score =
-            term_score(10.0, avg as f32, avg, df, n, &opts.scorer) * boost * opts.field_boost(schema, &f);
-        clauses.push(Clause { field: f, term: t, boost, max_score });
+        let max_score = term_score(10.0, avg as f32, avg, df, n, &opts.scorer)
+            * boost
+            * opts.field_boost(schema, &f);
+        clauses.push(Clause {
+            field: f,
+            term: t,
+            boost,
+            max_score,
+        });
     }
     clauses.sort_by(|a, b| b.max_score.partial_cmp(&a.max_score).unwrap());
     clauses
@@ -428,7 +484,9 @@ fn score_clauses(
         let avg = avg_cache.get(&c.field).copied().unwrap_or(0.0);
         if let Some(pl) = seg.postings_for(&c.field, &c.term) {
             for p in pl {
-                let Some(gid) = seg.docs.get(p.doc as usize) else { continue };
+                let Some(gid) = seg.docs.get(p.doc as usize) else {
+                    continue;
+                };
                 if !snap.live.contains(gid) {
                     continue;
                 }
@@ -480,7 +538,8 @@ fn phrase_df(snap: &Snapshot, field: &str, terms: &[String]) -> u64 {
     n
 }
 
-fn phrase_count(lists: &[&[Posting]], local: u32) -> usize {    let mut pos_sets: Vec<&Vec<u32>> = Vec::new();
+fn phrase_count(lists: &[&[Posting]], local: u32) -> usize {
+    let mut pos_sets: Vec<&Vec<u32>> = Vec::new();
     for pl in lists {
         match pl.iter().find(|p| p.doc == local) {
             Some(p) => pos_sets.push(&p.positions),
@@ -510,7 +569,7 @@ pub fn search(snap: &Snapshot, q: &Query, opts: &SearchOptions) -> Vec<Hit> {
     let k = opts.top_k.max(1);
     // one thread per segment (cap 8), merged with a heap
     let mut per_seg: Vec<Vec<(u32, f32)>> = Vec::new();
-    let nthreads = snap.segments.len().min(8).max(1);
+    let nthreads = snap.segments.len().clamp(1, 8);
     if snap.segments.len() <= 1 || nthreads == 1 {
         for s in &snap.segments {
             per_seg.push(eval_segment(s, snap, q, &snap.schema, opts, n, &avg_cache));
@@ -554,10 +613,12 @@ pub fn search(snap: &Snapshot, q: &Query, opts: &SearchOptions) -> Vec<Hit> {
 fn top_k(mut acc: HashMap<u32, f32>, k: usize) -> Vec<Hit> {
     // MaxScore-style cutoff: once sorted, docs past k are pruned. Scores are
     // exact; pruning only drops docs that cannot be in the top-k.
-    let mut hits: Vec<Hit> =
-        acc.drain().map(|(doc, score)| Hit { doc, score }).collect();
+    let mut hits: Vec<Hit> = acc.drain().map(|(doc, score)| Hit { doc, score }).collect();
     hits.sort_by(|a, b| {
-        b.score.partial_cmp(&a.score).unwrap().then_with(|| a.doc.cmp(&b.doc))
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap()
+            .then_with(|| a.doc.cmp(&b.doc))
     });
     hits.truncate(k);
     hits
@@ -573,7 +634,14 @@ pub fn snippet(text: &str, query_terms: &[String], window: usize) -> String {
     if words.is_empty() {
         return String::new();
     }
-    let norm: Vec<String> = words.iter().map(|w| stem(&w.to_lowercase()).trim_matches(|c: char| !c.is_alphanumeric()).to_string()).collect();
+    let norm: Vec<String> = words
+        .iter()
+        .map(|w| {
+            stem(&w.to_lowercase())
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_string()
+        })
+        .collect();
     let qset: HashSet<&str> = query_terms.iter().map(|s| s.as_str()).collect();
     let hit = norm.iter().position(|w| qset.contains(w.as_str()));
     let center = hit.unwrap_or(0);
@@ -584,7 +652,9 @@ pub fn snippet(text: &str, query_terms: &[String], window: usize) -> String {
         parts.push("…".to_string());
     }
     for w in &words[lo..hi] {
-        let n = stem(&w.to_lowercase()).trim_matches(|c: char| !c.is_alphanumeric()).to_string();
+        let n = stem(&w.to_lowercase())
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_string();
         if qset.contains(n.as_str()) {
             parts.push(format!("<mark>{w}</mark>"));
         } else {
@@ -606,7 +676,11 @@ pub fn suggest(snap: &Snapshot, field: &str, prefix: &str, limit: usize) -> Vec<
     let mut terms = snap.all_dict_terms(field);
     terms.retain(|(t, _)| t.starts_with(&p));
     terms.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    terms.into_iter().take(limit.max(1)).map(|(t, _)| t).collect()
+    terms
+        .into_iter()
+        .take(limit.clamp(1, usize::MAX))
+        .map(|(t, _)| t)
+        .collect()
 }
 
 /// Did-you-mean: closest dict term within edit distance 2, ranked by
@@ -621,7 +695,11 @@ pub fn did_you_mean(snap: &Snapshot, field: &str, term: &str) -> Option<String> 
         let d = edit_distance(&q, &t, 2);
         if d <= 2 {
             let cand = (d, u64::MAX - df, t.clone());
-            if best.as_ref().map(|b| cand < (b.0, b.1, b.2.clone())).unwrap_or(true) {
+            if best
+                .as_ref()
+                .map(|b| cand < (b.0, b.1, b.2.clone()))
+                .unwrap_or(true)
+            {
                 best = Some((d, u64::MAX - df, t));
             }
         }
@@ -640,9 +718,16 @@ mod tests {
         let schema = Schema::default();
         let mut w = SegmentWriter::default();
         let d = |t: &str, b: &str| {
-            BTreeMap::from([("title".to_string(), t.to_string()), ("body".to_string(), b.to_string())])
+            BTreeMap::from([
+                ("title".to_string(), t.to_string()),
+                ("body".to_string(), b.to_string()),
+            ])
         };
-        w.add_doc(0, &d("Rust search", "fast rust search engine in rust"), &schema);
+        w.add_doc(
+            0,
+            &d("Rust search", "fast rust search engine in rust"),
+            &schema,
+        );
         w.add_doc(1, &d("Cooking", "rust recipes for dinner"), &schema);
         w.add_doc(2, &d("Gardening", "tomatoes and soil"), &schema);
         let seg = w.finish(1);
@@ -667,10 +752,18 @@ mod tests {
     #[test]
     fn boolean_and_phrase() {
         let s = test_snap();
-        let hits = search(&s, &parse("rust AND recipes").unwrap(), &SearchOptions::top(10));
+        let hits = search(
+            &s,
+            &parse("rust AND recipes").unwrap(),
+            &SearchOptions::top(10),
+        );
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].doc, 1);
-        let hits = search(&s, &parse("\"search engine\"").unwrap(), &SearchOptions::top(10));
+        let hits = search(
+            &s,
+            &parse("\"search engine\"").unwrap(),
+            &SearchOptions::top(10),
+        );
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].doc, 0);
     }
@@ -678,9 +771,19 @@ mod tests {
     #[test]
     fn prefix_fuzzy_not() {
         let s = test_snap();
-        assert_eq!(search(&s, &parse("recip*").unwrap(), &SearchOptions::top(10)).len(), 1);
-        assert_eq!(search(&s, &parse("rust~1").unwrap(), &SearchOptions::top(10)).len(), 2);
-        let hits = search(&s, &parse("rust NOT recipes").unwrap(), &SearchOptions::top(10));
+        assert_eq!(
+            search(&s, &parse("recip*").unwrap(), &SearchOptions::top(10)).len(),
+            1
+        );
+        assert_eq!(
+            search(&s, &parse("rust~1").unwrap(), &SearchOptions::top(10)).len(),
+            2
+        );
+        let hits = search(
+            &s,
+            &parse("rust NOT recipes").unwrap(),
+            &SearchOptions::top(10),
+        );
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].doc, 0);
     }

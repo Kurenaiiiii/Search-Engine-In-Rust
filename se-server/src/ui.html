@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Search Engine in Rust</title>
+<style>
+:root { color-scheme: light dark; --acc: #4f46e5; }
+* { box-sizing: border-box; }
+body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; padding: 2rem 1rem 4rem; max-width: 860px; margin-inline: auto; line-height: 1.5; }
+header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+h1 { font-size: 1.6rem; margin: 0; }
+h1 span { color: var(--acc); }
+#stats { font-size: .85rem; opacity: .8; }
+form { display: flex; gap: .5rem; margin: 1.2rem 0; }
+input[type=search] { flex: 1; padding: .7rem 1rem; font-size: 1rem; border-radius: .6rem; border: 1px solid #888; }
+button { padding: .7rem 1.2rem; font-size: 1rem; border-radius: .6rem; border: 0; background: var(--acc); color: white; cursor: pointer; }
+#meta { font-size: .85rem; opacity: .8; margin-bottom: .5rem; }
+.result { border: 1px solid #8885; border-radius: .6rem; padding: .8rem 1rem; margin: .6rem 0; }
+.result h3 { margin: 0 0 .3rem; font-size: 1.05rem; }
+.result .score { font-size: .75rem; opacity: .7; }
+mark { background: #facc15; color: #111; border-radius: 3px; padding: 0 2px; }
+#suggest { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: .5rem; }
+#suggest button { background: transparent; color: var(--acc); border: 1px solid var(--acc); padding: .2rem .6rem; font-size: .8rem; }
+#error { color: #dc2626; }
+</style>
+</head>
+<body>
+<header>
+<h1>Search Engine <span>in Rust</span></h1>
+<div id="stats">loading stats…</div>
+</header>
+<form id="f">
+<input id="q" type="search" placeholder="Try: rust AND engine, &quot;search engine&quot;, recip*, rust~1, title:rust" autocomplete="off" autofocus>
+<button type="submit">Search</button>
+</form>
+<div id="suggest"></div>
+<div id="meta"></div>
+<div id="error"></div>
+<div id="results"></div>
+<script>
+const q = document.getElementById('q');
+async function stats() {
+  try {
+    const r = await fetch('/api/stats');
+    const s = await r.json();
+    document.getElementById('stats').textContent =
+      `${s.live_docs} docs · ${s.segments} segments · ${(s.postings_bytes/1024).toFixed(1)} KiB postings`;
+  } catch (e) { document.getElementById('stats').textContent = 'stats unavailable'; }
+}
+async function run(ev) {
+  if (ev) ev.preventDefault();
+  const query = q.value.trim();
+  if (!query) return;
+  document.getElementById('error').textContent = '';
+  const t0 = performance.now();
+  const r = await fetch('/api/search?q=' + encodeURIComponent(query) + '&k=10&highlight=1');
+  const dt = (performance.now() - t0).toFixed(0);
+  if (!r.ok) { document.getElementById('error').textContent = (await r.json()).error || r.status; return; }
+  const data = await r.json();
+  document.getElementById('meta').textContent =
+    `${data.total} hits in ${data.took_ms} ms (server) · ${dt} ms (round-trip)`;
+  const box = document.getElementById('results');
+  box.innerHTML = '';
+  for (const h of data.hits) {
+    const d = document.createElement('div');
+    d.className = 'result';
+    const title = (h.fields.title || h.fields.body || '(doc ' + h.id + ')').slice(0, 80);
+    d.innerHTML = `<h3></h3><div class="score">doc ${h.id} · score ${h.score.toFixed(3)}</div><p></p>`;
+    d.querySelector('h3').textContent = title;
+    d.querySelector('p').innerHTML = h.snippet || '';
+    box.appendChild(d);
+  }
+  if (data.did_you_mean) {
+    const p = document.createElement('p');
+    p.innerHTML = 'Did you mean: ';
+    const b = document.createElement('button');
+    b.textContent = data.did_you_mean;
+    b.onclick = () => { q.value = data.did_you_mean; run(); };
+    p.appendChild(b);
+    box.prepend(p);
+  }
+}
+let deb = null;
+q.addEventListener('input', () => {
+  clearTimeout(deb);
+  deb = setTimeout(async () => {
+    const v = q.value.trim().split(/\s+/).pop() || '';
+    if (v.length < 2) { document.getElementById('suggest').innerHTML = ''; return; }
+    const r = await fetch('/api/suggest?prefix=' + encodeURIComponent(v) + '&limit=6');
+    const s = await r.json();
+    const box = document.getElementById('suggest');
+    box.innerHTML = '';
+    for (const t of s.suggestions) {
+      const b = document.createElement('button');
+      b.textContent = t;
+      b.onclick = () => { const parts = q.value.trim().split(/\s+/); parts[parts.length-1] = t; q.value = parts.join(' ') + ' '; q.focus(); };
+      box.appendChild(b);
+    }
+  }, 150);
+});
+document.getElementById('f').addEventListener('submit', run);
+stats();
+</script>
+</body>
+</html>

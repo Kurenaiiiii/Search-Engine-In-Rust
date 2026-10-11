@@ -3,10 +3,27 @@
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Query {
-    Term { field: Option<String>, term: String, boost: f32 },
-    Phrase { field: Option<String>, terms: Vec<String>, boost: f32 },
-    Prefix { field: Option<String>, prefix: String, boost: f32 },
-    Fuzzy { field: Option<String>, term: String, dist: u32, boost: f32 },
+    Term {
+        field: Option<String>,
+        term: String,
+        boost: f32,
+    },
+    Phrase {
+        field: Option<String>,
+        terms: Vec<String>,
+        boost: f32,
+    },
+    Prefix {
+        field: Option<String>,
+        prefix: String,
+        boost: f32,
+    },
+    Fuzzy {
+        field: Option<String>,
+        term: String,
+        dist: u32,
+        boost: f32,
+    },
     And(Vec<Query>),
     Or(Vec<Query>),
     Not(Box<Query>),
@@ -94,9 +111,10 @@ fn parse_boost(s: &str) -> Result<(&str, f32), String> {
         if base.is_empty() {
             return Err(format!("invalid boost in '{s}': missing term before ^"));
         }
-        let v: f32 =
-            b.parse().map_err(|_| format!("invalid boost '{b}' in '{s}': must be a number"))?;
-        if !(v > 0.0) {
+        let v: f32 = b
+            .parse()
+            .map_err(|_| format!("invalid boost '{b}' in '{s}': must be a number"))?;
+        if v.is_nan() || v <= 0.0 {
             return Err(format!("invalid boost '{b}': must be positive"));
         }
         Ok((base, v))
@@ -116,7 +134,12 @@ fn parse_atom_word(w: &str) -> Result<Query, String> {
         if t.is_empty() {
             return Err(format!("empty fuzzy term in '{w}'"));
         }
-        return Ok(Query::Fuzzy { field, term: t.to_string(), dist: 1, boost });
+        return Ok(Query::Fuzzy {
+            field,
+            term: t.to_string(),
+            dist: 1,
+            boost,
+        });
     }
     if let Some(tilde) = base.find('~') {
         let (term, d) = (&base[..tilde], &base[tilde + 1..]);
@@ -129,26 +152,47 @@ fn parse_atom_word(w: &str) -> Result<Query, String> {
         if dist > 2 {
             return Err(format!("edit distance {dist} too large in '{w}': max is 2"));
         }
-        return Ok(Query::Fuzzy { field, term: term.to_string(), dist, boost });
+        return Ok(Query::Fuzzy {
+            field,
+            term: term.to_string(),
+            dist,
+            boost,
+        });
     }
     if let Some(pre) = base.strip_suffix('*') {
         if pre.is_empty() {
-            return Err(format!("empty prefix in '{w}': need at least one character before *"));
+            return Err(format!(
+                "empty prefix in '{w}': need at least one character before *"
+            ));
         }
-        return Ok(Query::Prefix { field, prefix: pre.to_string(), boost });
+        return Ok(Query::Prefix {
+            field,
+            prefix: pre.to_string(),
+            boost,
+        });
     }
     if base.is_empty() {
         return Err(format!("empty term in '{w}'"));
     }
-    Ok(Query::Term { field, term: base.to_string(), boost })
+    Ok(Query::Term {
+        field,
+        term: base.to_string(),
+        boost,
+    })
 }
 
-fn parse_atom_phrase(field_part: Option<&str>, s: &str, outer_boost: &str) -> Result<Query, String> {
+fn parse_atom_phrase(
+    field_part: Option<&str>,
+    s: &str,
+    outer_boost: &str,
+) -> Result<Query, String> {
     // phrase may carry field prefix "field:..." before the quote handled by caller,
     // and boost after the closing quote is handled by caller too.
     let _ = outer_boost;
-    let terms: Vec<String> =
-        crate::analysis::tokenize(s).into_iter().map(|t| crate::analysis::stem(&t)).collect();
+    let terms: Vec<String> = crate::analysis::tokenize(s)
+        .into_iter()
+        .map(|t| crate::analysis::stem(&t))
+        .collect();
     if terms.is_empty() {
         return Err("empty quoted phrase: phrase must contain at least one word".to_string());
     }
@@ -193,7 +237,11 @@ impl Parser {
                 }
             }
         }
-        Ok(if parts.len() == 1 { parts.pop().unwrap() } else { Query::And(parts) })
+        Ok(if parts.len() == 1 {
+            parts.pop().unwrap()
+        } else {
+            Query::And(parts)
+        })
     }
     fn unary(&mut self) -> Result<Query, String> {
         match self.peek() {
@@ -227,9 +275,7 @@ impl Parser {
             }
             Some(Tok::Word(w)) => {
                 // field:"phrase" form: word ends with ':' and next is Phrase
-                if w.ends_with(':')
-                    && matches!(self.toks.get(self.pos + 1), Some(Tok::Phrase(_)))
-                {
+                if w.ends_with(':') && matches!(self.toks.get(self.pos + 1), Some(Tok::Phrase(_))) {
                     let f = w[..w.len() - 1].to_string();
                     if f.is_empty() || !f.chars().all(|c| c.is_alphanumeric() || c == '_') {
                         return Err(format!("invalid field name in '{w}'"));
@@ -244,10 +290,9 @@ impl Parser {
                 self.pos += 1;
                 parse_atom_word(&w)
             }
-            Some(Tok::And) | Some(Tok::Or) => {
-                Err("unexpected AND/OR here: a query cannot start with a boolean operator"
-                    .to_string())
-            }
+            Some(Tok::And) | Some(Tok::Or) => Err(
+                "unexpected AND/OR here: a query cannot start with a boolean operator".to_string(),
+            ),
             Some(Tok::RParen) => Err("unexpected ')': no matching '('".to_string()),
             Some(Tok::Not) => unreachable!(),
             None => Err("unexpected end of query: expected a term".to_string()),
@@ -302,23 +347,44 @@ mod tests {
     fn parse_basics() {
         assert_eq!(
             parse("hello").unwrap(),
-            Query::Term { field: None, term: "hello".into(), boost: 1.0 }
+            Query::Term {
+                field: None,
+                term: "hello".into(),
+                boost: 1.0
+            }
         );
         assert_eq!(
             parse("title:rust").unwrap(),
-            Query::Term { field: Some("title".into()), term: "rust".into(), boost: 1.0 }
+            Query::Term {
+                field: Some("title".into()),
+                term: "rust".into(),
+                boost: 1.0
+            }
         );
         assert_eq!(
             parse("rust*").unwrap(),
-            Query::Prefix { field: None, prefix: "rust".into(), boost: 1.0 }
+            Query::Prefix {
+                field: None,
+                prefix: "rust".into(),
+                boost: 1.0
+            }
         );
         assert_eq!(
             parse("rust~2").unwrap(),
-            Query::Fuzzy { field: None, term: "rust".into(), dist: 2, boost: 1.0 }
+            Query::Fuzzy {
+                field: None,
+                term: "rust".into(),
+                dist: 2,
+                boost: 1.0
+            }
         );
         assert_eq!(
             parse("\"fast search\"").unwrap(),
-            Query::Phrase { field: None, terms: vec!["fast".into(), "search".into()], boost: 1.0 }
+            Query::Phrase {
+                field: None,
+                terms: vec!["fast".into(), "search".into()],
+                boost: 1.0
+            }
         );
     }
 
@@ -342,13 +408,19 @@ mod tests {
     fn parse_boost() {
         assert_eq!(
             parse("rust^3").unwrap(),
-            Query::Term { field: None, term: "rust".into(), boost: 3.0 }
+            Query::Term {
+                field: None,
+                term: "rust".into(),
+                boost: 3.0
+            }
         );
     }
 
     #[test]
     fn parse_errors_clear() {
-        for bad in ["(", "()", "\"abc", "rust~5", "rust~x", "*", "rust^", "rust^-1", "AND"] {
+        for bad in [
+            "(", "()", "\"abc", "rust~5", "rust~x", "*", "rust^", "rust^-1", "AND",
+        ] {
             assert!(parse(bad).is_err(), "should fail: {bad}");
         }
         let e = parse("(a").unwrap_err();

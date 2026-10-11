@@ -67,7 +67,10 @@ impl Index {
         if wal_path.exists() {
             wal_len = fs::metadata(&wal_path)?.len();
         }
-        let wal = OpenOptions::new().create(true).append(true).open(&wal_path)?;
+        let wal = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&wal_path)?;
         let idx = Self {
             dir: dir.to_path_buf(),
             inner: RwLock::new(Inner {
@@ -101,7 +104,12 @@ impl Index {
                 inner.stored.insert(gid, fields);
             }
             // next_id must exceed any seg doc
-            let max_seg = inner.segments.iter().flat_map(|s| s.docs.iter()).max().copied();
+            let max_seg = inner
+                .segments
+                .iter()
+                .flat_map(|s| s.docs.iter())
+                .max()
+                .copied();
             if let Some(m) = max_seg {
                 inner.next_id = inner.next_id.max(m + 1);
             }
@@ -150,10 +158,7 @@ impl Index {
 
     fn fail_here(&self, at: FailAt) -> std::io::Result<()> {
         if self.fail.lock().unwrap().as_ref() == Some(&at) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("injected failure at {at:?}"),
-            ));
+            return Err(std::io::Error::other(format!("injected failure at {at:?}")));
         }
         Ok(())
     }
@@ -263,7 +268,10 @@ impl Index {
     fn write_manifest(&self) -> std::io::Result<()> {
         let inner = self.inner.read().unwrap();
         let tmp = self.dir.join("MANIFEST.tmp");
-        let mut s = format!("{}\n{}\n{}\n", inner.next_id, inner.next_seg, inner.wal_applied);
+        let mut s = format!(
+            "{}\n{}\n{}\n",
+            inner.next_id, inner.next_seg, inner.wal_applied
+        );
         for seg in &inner.segments {
             s.push_str(&format!("{}\n", seg.id));
         }
@@ -282,8 +290,10 @@ impl Index {
         }
         // drop dead docs before merging
         let live = self.inner.read().unwrap().live.clone();
-        let filtered: Vec<Segment> =
-            snapshot_segs.iter().map(|s| retain_live(s, &live)).collect();
+        let filtered: Vec<Segment> = snapshot_segs
+            .iter()
+            .map(|s| retain_live(s, &live))
+            .collect();
         let seg_id = self.inner.read().unwrap().next_seg;
         let merged = merge_segments(seg_id, &filtered);
         let bytes = merged.encode();
@@ -385,11 +395,7 @@ impl Index {
     }
 }
 
-fn apply_record(
-    inner: &mut Inner,
-    rec: &[u8],
-    rebound: &mut Vec<(u32, BTreeMap<String, String>)>,
-) {
+fn apply_record(inner: &mut Inner, rec: &[u8], rebound: &mut Vec<(u32, BTreeMap<String, String>)>) {
     if rec.is_empty() {
         return;
     }
@@ -460,8 +466,13 @@ fn load_manifest(dir: &Path) -> std::io::Result<(Vec<Segment>, u32, u64, u64)> {
 
 /// Strip dead (tombstoned) docs out of a segment copy.
 fn retain_live(seg: &Segment, live: &HashSet<u32>) -> Segment {
-    let keep: Vec<usize> =
-        seg.docs.iter().enumerate().filter(|(_, g)| live.contains(g)).map(|(i, _)| i).collect();
+    let keep: Vec<usize> = seg
+        .docs
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| live.contains(g))
+        .map(|(i, _)| i)
+        .collect();
     let remap: HashMap<u32, u32> = keep
         .iter()
         .enumerate()
@@ -487,7 +498,8 @@ fn retain_live(seg: &Segment, live: &HashSet<u32>) -> Segment {
             }
         }
         if !np.is_empty() {
-            out.compressed.insert(k.clone(), codec::encode_postings(&np));
+            out.compressed
+                .insert(k.clone(), codec::encode_postings(&np));
             out.postings.insert(k.clone(), np);
         }
     }
@@ -541,12 +553,19 @@ mod tests {
         idx.flush().unwrap();
         assert!(idx.delete(id).unwrap());
         idx.flush().unwrap();
-        assert_eq!(idx.search("search", &SearchOptions::top(10)).unwrap().len(), 0);
+        assert_eq!(
+            idx.search("search", &SearchOptions::top(10)).unwrap().len(),
+            0
+        );
         let id2 = idx.add(sample()).unwrap();
-        idx.update(id2, BTreeMap::from([("title".into(), "zzz".into())])).unwrap();
+        idx.update(id2, BTreeMap::from([("title".into(), "zzz".into())]))
+            .unwrap();
         idx.flush().unwrap();
         assert_eq!(idx.search("zzz", &SearchOptions::top(10)).unwrap().len(), 1);
-        assert_eq!(idx.search("search", &SearchOptions::top(10)).unwrap().len(), 0);
+        assert_eq!(
+            idx.search("search", &SearchOptions::top(10)).unwrap().len(),
+            0
+        );
     }
 
     #[test]
@@ -582,7 +601,10 @@ mod tests {
             // both committed docs recovered (WAL replay)
             assert_eq!(idx.stats().live_docs, 2);
             idx.flush().unwrap();
-            assert_eq!(idx.search("search", &SearchOptions::top(10)).unwrap().len(), 2);
+            assert_eq!(
+                idx.search("search", &SearchOptions::top(10)).unwrap().len(),
+                2
+            );
         }
     }
 
@@ -628,7 +650,11 @@ mod tests {
             readers.push(std::thread::spawn(move || {
                 for _ in 0..20 {
                     let snap = me.snapshot();
-                    let _ = search::search(&snap, &query::parse("search").unwrap(), &SearchOptions::top(5));
+                    let _ = search::search(
+                        &snap,
+                        &query::parse("search").unwrap(),
+                        &SearchOptions::top(5),
+                    );
                 }
             }));
         }

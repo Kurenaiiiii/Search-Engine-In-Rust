@@ -8,8 +8,24 @@ use se_core::search::SearchOptions;
 use std::collections::BTreeMap;
 
 const VOCAB: &[&str] = &[
-    "rust", "search", "engine", "fast", "index", "query", "document", "token", "merge",
-    "segment", "ranking", "bm25", "phrase", "fuzzy", "prefix", "wal", "snapshot", "tombstone",
+    "rust",
+    "search",
+    "engine",
+    "fast",
+    "index",
+    "query",
+    "document",
+    "token",
+    "merge",
+    "segment",
+    "ranking",
+    "bm25",
+    "phrase",
+    "fuzzy",
+    "prefix",
+    "wal",
+    "snapshot",
+    "tombstone",
 ];
 
 fn random_doc(rng: &mut Rng) -> BTreeMap<String, String> {
@@ -19,7 +35,10 @@ fn random_doc(rng: &mut Rng) -> BTreeMap<String, String> {
         words.push(rng.pick(VOCAB).to_string());
     }
     let title = words[..words.len().min(3)].join(" ");
-    BTreeMap::from([("title".to_string(), title), ("body".to_string(), words.join(" "))])
+    BTreeMap::from([
+        ("title".to_string(), title),
+        ("body".to_string(), words.join(" ")),
+    ])
 }
 
 fn random_query(rng: &mut Rng) -> String {

@@ -1,0 +1,12 @@
+rust
+search engine
+rust AND engine
+rust OR python
+"search engine"
+"full text search"
+eng*
+serch~1
+rust~1
+title:rust
+(rust OR search) AND engine
+NOT python
