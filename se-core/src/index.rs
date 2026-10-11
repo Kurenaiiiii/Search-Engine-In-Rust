@@ -280,8 +280,8 @@ impl Index {
         Ok(())
     }
 
-    /// Tiered merge: merge the 4 smallest segments into one. Bounded memory
-    /// (only a few segments are copied), unlike [`Index::merge_all`].
+    /// Tiered merge: merge the 2 smallest segments into one. Bounded memory
+    /// (only two segments are copied), unlike [`Index::merge_all`].
     /// Returns true when a merge happened.
     pub fn merge_tier(&self) -> std::io::Result<bool> {
         let _commit = self.commit.lock().unwrap();
@@ -298,7 +298,7 @@ impl Index {
                 .enumerate()
                 .collect();
             v.sort_by_key(|&(_, n)| n);
-            v.truncate(4.min(v.len()));
+            v.truncate(2.min(v.len()));
             v
         };
         ids.sort_by_key(|&(i, _)| i);

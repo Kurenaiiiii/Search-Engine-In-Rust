@@ -86,6 +86,21 @@ fn main() {
                 })
             {
                 rounds += 1;
+                let st = idx.stats();
+                let rss = std::fs::read_to_string("/proc/self/status")
+                    .ok()
+                    .and_then(|t| {
+                        t.lines().find(|l| l.starts_with("VmRSS")).and_then(|l| {
+                            l.split_whitespace()
+                                .nth(1)
+                                .and_then(|v| v.parse::<u64>().ok())
+                        })
+                    })
+                    .unwrap_or(0);
+                eprintln!(
+                    "round {rounds}: segments={} live={} rss_kb={rss}",
+                    st.segments, st.live_docs
+                );
             }
             println!(
                 "merged in {rounds} rounds, {:.1}s",
