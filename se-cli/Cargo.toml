@@ -1,0 +1,12 @@
+[package]
+name = "se-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "se-cli"
+path = "src/main.rs"
+
+[dependencies]
+se-core = { path = "../se-core" }

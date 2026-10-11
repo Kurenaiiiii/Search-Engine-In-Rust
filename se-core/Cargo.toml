@@ -1,0 +1,9 @@
+[package]
+name = "se-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "se_core"
+path = "src/lib.rs"
