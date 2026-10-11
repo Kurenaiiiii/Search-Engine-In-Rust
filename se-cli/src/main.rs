@@ -105,6 +105,7 @@ fn main() {
         "bench" => {
             let mut queries = "tools/bench_queries.txt".to_string();
             let mut iters = 20usize;
+            let mut threads = 8usize;
             let mut k = 1;
             while k < rest.len() {
                 match rest[k].as_str() {
@@ -116,10 +117,14 @@ fn main() {
                         iters = rest[k + 1].parse().unwrap_or(20);
                         k += 2;
                     }
+                    "--threads" if k + 1 < rest.len() => {
+                        threads = rest[k + 1].parse().unwrap_or(8);
+                        k += 2;
+                    }
                     _ => k += 1,
                 }
             }
-            cmd_bench(&dir, &queries, iters);
+            cmd_bench(&dir, &queries, iters, threads);
         }
         _ => usage(),
     }
@@ -243,7 +248,7 @@ fn pct(mut v: Vec<u128>, p: f64) -> u128 {
     v[((p * v.len() as f64) as usize).min(v.len() - 1)]
 }
 
-fn cmd_bench(dir: &str, queries_file: &str, iters: usize) {
+fn cmd_bench(dir: &str, queries_file: &str, iters: usize, threads: usize) {
     let idx = open(dir);
     let text = std::fs::read_to_string(queries_file).unwrap_or_else(|e| {
         eprintln!("cannot read {queries_file}: {e}");
@@ -255,12 +260,16 @@ fn cmd_bench(dir: &str, queries_file: &str, iters: usize) {
         .filter(|l| !l.is_empty())
         .map(String::from)
         .collect();
-    print!("{{\"iters\":{iters},\"queries\":[");
+    print!("{{\"iters\":{iters},\"threads\":{threads},\"queries\":[");
     for (i, q) in queries.iter().enumerate() {
         if i > 0 {
             print!(",");
         }
-        let opts = SearchOptions::top(10);
+        let opts = SearchOptions {
+            top_k: 10,
+            max_threads: threads,
+            ..Default::default()
+        };
         // warmup
         for _ in 0..3 {
             let _ = idx.search(q, &opts);

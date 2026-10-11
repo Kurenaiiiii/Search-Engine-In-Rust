@@ -22,12 +22,26 @@ impl Default for Scorer {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SearchOptions {
     pub top_k: usize,
     pub scorer: Scorer,
     pub field_boosts: HashMap<String, f32>,
     pub default_fields: Vec<String>,
+    /// max search threads across segments; 1 = single-threaded
+    pub max_threads: usize,
+}
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        Self {
+            top_k: 10,
+            scorer: Scorer::default(),
+            field_boosts: HashMap::new(),
+            default_fields: Vec::new(),
+            max_threads: 8,
+        }
+    }
 }
 
 impl SearchOptions {
@@ -99,7 +113,7 @@ pub fn edit_distance(a: &str, b: &str, cap: u32) -> u32 {
 /// A snapshot of segments searched as one consistent view.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
-    pub segments: Vec<Segment>,
+    pub segments: Vec<std::sync::Arc<Segment>>,
     /// live (non-deleted) global doc ids
     pub live: HashSet<u32>,
     pub stored: BTreeMap<u32, BTreeMap<String, String>>,
@@ -569,7 +583,7 @@ pub fn search(snap: &Snapshot, q: &Query, opts: &SearchOptions) -> Vec<Hit> {
     let k = opts.top_k.max(1);
     // one thread per segment (cap 8), merged with a heap
     let mut per_seg: Vec<Vec<(u32, f32)>> = Vec::new();
-    let nthreads = snap.segments.len().clamp(1, 8);
+    let nthreads = snap.segments.len().clamp(1, opts.max_threads.max(1));
     if snap.segments.len() <= 1 || nthreads == 1 {
         for s in &snap.segments {
             per_seg.push(eval_segment(s, snap, q, &snap.schema, opts, n, &avg_cache));
@@ -578,10 +592,10 @@ pub fn search(snap: &Snapshot, q: &Query, opts: &SearchOptions) -> Vec<Hit> {
         std::thread::scope(|scope| {
             let mut handles = Vec::new();
             // chunk segments across threads
-            let chunks: Vec<Vec<Segment>> = {
-                let mut cs: Vec<Vec<Segment>> = vec![Vec::new(); nthreads];
+            let chunks: Vec<Vec<std::sync::Arc<Segment>>> = {
+                let mut cs: Vec<Vec<std::sync::Arc<Segment>>> = vec![Vec::new(); nthreads];
                 for (i, s) in snap.segments.iter().enumerate() {
-                    cs[i % nthreads].push(s.clone());
+                    cs[i % nthreads].push(std::sync::Arc::clone(s));
                 }
                 cs
             };
@@ -732,7 +746,7 @@ mod tests {
         w.add_doc(2, &d("Gardening", "tomatoes and soil"), &schema);
         let seg = w.finish(1);
         Snapshot {
-            segments: vec![seg],
+            segments: vec![std::sync::Arc::new(seg)],
             live: [0, 1, 2].into_iter().collect(),
             stored: BTreeMap::new(),
             schema,

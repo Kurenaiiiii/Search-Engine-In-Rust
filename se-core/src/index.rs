@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 
 use crate::analysis::Schema;
@@ -39,7 +39,7 @@ pub struct Stats {
 
 struct Inner {
     schema: Schema,
-    segments: Vec<Segment>,
+    segments: Vec<Arc<Segment>>,
     buffer: Vec<(u32, BTreeMap<String, String>)>,
     live: HashSet<u32>,
     stored: BTreeMap<u32, BTreeMap<String, String>>,
@@ -252,7 +252,7 @@ impl Index {
         self.fail_here(FailAt::FlushCommit)?;
         {
             let mut inner = self.inner.write().unwrap();
-            inner.segments.push(seg);
+            inner.segments.push(Arc::new(seg));
             let flushed: HashSet<u32> = docs.iter().map(|(g, _)| *g).collect();
             inner.buffer.retain(|(g, _)| !flushed.contains(g));
             inner.next_seg += 1;
@@ -284,7 +284,7 @@ impl Index {
     pub fn merge_all(&self) -> std::io::Result<bool> {
         let _commit = self.commit.lock().unwrap();
         self.fail_here(FailAt::MergeWrite)?;
-        let snapshot_segs: Vec<Segment> = self.inner.read().unwrap().segments.clone();
+        let snapshot_segs: Vec<Arc<Segment>> = self.inner.read().unwrap().segments.clone();
         if snapshot_segs.len() < 2 {
             return Ok(false);
         }
@@ -308,7 +308,7 @@ impl Index {
             let mut inner = self.inner.write().unwrap();
             let old_ids: HashSet<u64> = snapshot_segs.iter().map(|s| s.id).collect();
             inner.segments.retain(|s| !old_ids.contains(&s.id));
-            inner.segments.push(merged);
+            inner.segments.push(Arc::new(merged));
             inner.next_seg += 1;
         }
         self.write_manifest()?;
@@ -359,7 +359,7 @@ impl Index {
             for (gid, fields) in &inner.buffer {
                 w.add_doc(*gid, fields, &inner.schema);
             }
-            segments.push(w.finish(u64::MAX));
+            segments.push(Arc::new(w.finish(u64::MAX)));
         }
         Snapshot {
             segments,
@@ -438,7 +438,7 @@ fn apply_record(inner: &mut Inner, rec: &[u8], rebound: &mut Vec<(u32, BTreeMap<
     }
 }
 
-fn load_manifest(dir: &Path) -> std::io::Result<(Vec<Segment>, u32, u64, u64)> {
+fn load_manifest(dir: &Path) -> std::io::Result<(Vec<Arc<Segment>>, u32, u64, u64)> {
     let path = dir.join("MANIFEST");
     if !path.exists() {
         return Ok((Vec::new(), 0, 0, 0));
@@ -448,7 +448,7 @@ fn load_manifest(dir: &Path) -> std::io::Result<(Vec<Segment>, u32, u64, u64)> {
     let next_id: u32 = lines.next().unwrap_or("0").trim().parse().unwrap_or(0);
     let next_seg: u64 = lines.next().unwrap_or("0").trim().parse().unwrap_or(0);
     let wal_applied: u64 = lines.next().unwrap_or("0").trim().parse().unwrap_or(0);
-    let mut segs = Vec::new();
+    let mut segs: Vec<Arc<Segment>> = Vec::new();
     for l in lines {
         let id: u64 = match l.trim().parse() {
             Ok(v) => v,
@@ -457,7 +457,7 @@ fn load_manifest(dir: &Path) -> std::io::Result<(Vec<Segment>, u32, u64, u64)> {
         let p = dir.join("segments").join(format!("seg_{id}.dat"));
         if let Ok(bytes) = fs::read(&p) {
             if let Some(seg) = Segment::decode(&bytes) {
-                segs.push(seg);
+                segs.push(Arc::new(seg));
             }
         }
     }
