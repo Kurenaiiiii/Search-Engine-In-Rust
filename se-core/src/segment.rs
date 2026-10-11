@@ -2,7 +2,7 @@
 //! compressed) term dictionary, compressed postings with skip pointers,
 //! term positions, and a stored-fields document store.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::analysis::Schema;
 use crate::codec::{self, Posting, SkipEntry};
@@ -407,38 +407,93 @@ impl SegmentWriter {
     }
 }
 
-/// Merge segments into one: union postings, remap local ids, keep stored.
-pub fn merge_segments(id: u64, segs: &[Segment]) -> Segment {
-    let mut w = SegmentWriter::default();
-    // global order kept sorted for delta compression wins
-    let mut all: Vec<(u32, StoredDoc, FieldLens)> = Vec::new();
-    for s in segs {
-        for (i, gid) in s.docs.iter().enumerate() {
-            all.push((*gid, s.stored[i].clone(), s.field_lens[i].clone()));
+/// Merge segments into one. Sort-based (not nested maps): union the doc
+/// lists, remap local ids, then gather each term's postings across segments
+/// and sort by new local id. Peak memory stays near one extra copy.
+pub fn merge_segments(id: u64, mut segs: Vec<Segment>) -> Segment {
+    // union of docs, sorted by global id for good delta compression
+    let mut order: Vec<(u32, usize, usize)> = Vec::new(); // (gid, seg, local)
+    for (si, s) in segs.iter().enumerate() {
+        for (li, gid) in s.docs.iter().enumerate() {
+            order.push((*gid, si, li));
         }
     }
-    all.sort_by_key(|(g, _, _)| *g);
-    // rebuild inverted index from stored docs is wasteful; remap directly
-    let mut inv: InvMap = BTreeMap::new();
-    for (new_local, (gid, stored, lens)) in all.iter().enumerate() {
-        let nl = new_local as u32;
-        w.docs.push(*gid);
-        w.stored.push(stored.clone());
-        w.field_lens.push(lens.clone());
-        let _ = nl;
+    order.sort_by_key(|&(g, _, _)| g);
+    let mut new_local: HashMap<u32, u32> = HashMap::with_capacity(order.len());
+    let mut docs = Vec::with_capacity(order.len());
+    let mut stored = Vec::with_capacity(order.len());
+    let mut field_lens = Vec::with_capacity(order.len());
+    // move stored/lens out of the inputs to avoid a full extra copy
+    let mut taken_stored: Vec<Vec<BTreeMap<String, String>>> = segs
+        .iter_mut()
+        .map(|s| std::mem::take(&mut s.stored))
+        .collect();
+    let mut taken_lens: Vec<Vec<FieldLens>> = segs
+        .iter_mut()
+        .map(|s| std::mem::take(&mut s.field_lens))
+        .collect();
+    for (nl, (gid, si, li)) in order.iter().enumerate() {
+        new_local.insert(*gid, nl as u32);
+        docs.push(*gid);
+        stored.push(std::mem::take(&mut taken_stored[*si][*li]));
+        field_lens.push(std::mem::take(&mut taken_lens[*si][*li]));
     }
-    for s in segs {
-        for ((f, t), plist) in &s.postings {
-            let e = inv.entry((f.clone(), t.clone())).or_default();
-            for p in plist {
-                let gid = s.docs[p.doc as usize];
-                let nl = w.docs.iter().position(|&g| g == gid).unwrap() as u32;
-                e.insert(nl, (p.freq, p.positions.clone()));
+    // distinct term keys (cloned once; vocab-sized, not postings-sized)
+    let mut keys: Vec<(String, String)> = Vec::new();
+    {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        for s in &segs {
+            for k in s.postings.keys() {
+                if seen.insert(k) {
+                    keys.push(k.clone());
+                }
             }
         }
     }
-    w.inv = inv;
-    w.finish(id)
+    keys.sort();
+    let mut postings: BTreeMap<(String, String), Vec<Posting>> = BTreeMap::new();
+    let mut compressed = BTreeMap::new();
+    let mut gather: Vec<(u32, u32, Vec<u32>)> = Vec::new(); // (new_local, freq, positions)
+    for key in keys {
+        gather.clear();
+        for s in &segs {
+            if let Some(plist) = s.postings.get(&key) {
+                for p in plist {
+                    let gid = s.docs[p.doc as usize];
+                    if let Some(&nl) = new_local.get(&gid) {
+                        gather.push((nl, p.freq, p.positions.clone()));
+                    }
+                }
+            }
+        }
+        if gather.is_empty() {
+            continue;
+        }
+        gather.sort_by_key(|&(nl, _, _)| nl);
+        let plist: Vec<Posting> = gather
+            .drain(..)
+            .map(|(doc, freq, positions)| Posting {
+                doc,
+                freq,
+                positions,
+            })
+            .collect();
+        compressed.insert(key.clone(), codec::encode_postings(&plist));
+        postings.insert(key, plist);
+    }
+    let mut seg = Segment {
+        id,
+        docs,
+        postings,
+        compressed,
+        skips: BTreeMap::new(),
+        field_lens,
+        stored,
+        dict: TermDict::default(),
+    };
+    seg.rebuild_aux();
+    seg
 }
 
 #[cfg(test)]
@@ -509,7 +564,7 @@ mod tests {
         w1.add_doc(0, &doc("a", "alpha beta"), &schema);
         let mut w2 = SegmentWriter::default();
         w2.add_doc(1, &doc("b", "beta gamma"), &schema);
-        let m = merge_segments(3, &[w1.finish(1), w2.finish(2)]);
+        let m = merge_segments(3, vec![w1.finish(1), w2.finish(2)]);
         assert_eq!(m.doc_count(), 2);
         assert_eq!(m.df("body", "beta"), 2);
         assert_eq!(m.df("body", "alpha"), 1);

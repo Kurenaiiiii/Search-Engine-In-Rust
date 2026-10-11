@@ -316,7 +316,7 @@ impl Index {
             .map(|s| retain_live(s, &live))
             .collect();
         let seg_id = self.inner.read().unwrap().next_seg;
-        let merged = merge_segments(seg_id, &filtered);
+        let merged = merge_segments(seg_id, filtered);
         let bytes = merged.encode();
         let path = self.dir.join("segments").join(format!("seg_{seg_id}.dat"));
         {
@@ -355,7 +355,7 @@ impl Index {
             .map(|s| retain_live(s, &live))
             .collect();
         let seg_id = self.inner.read().unwrap().next_seg;
-        let merged = merge_segments(seg_id, &filtered);
+        let merged = merge_segments(seg_id, filtered);
         let bytes = merged.encode();
         let path = self.dir.join("segments").join(format!("seg_{seg_id}.dat"));
         {
