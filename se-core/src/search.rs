@@ -284,6 +284,127 @@ struct Clause {
     max_score: f32,
 }
 
+/// Precomputed per-search collection statistics. Expansion, df and phrase-df
+/// depend only on the snapshot, so they are computed once per search instead
+/// of once per segment (which was quadratic in the segment count).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct ExpKey {
+    field: Option<String>,
+    kind: u8, // 0 = term, 1 = prefix, 2 = fuzzy
+    raw: String,
+    dist: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct QueryStats {
+    avg: HashMap<String, f64>,
+    df: HashMap<(String, String), u64>,
+    expansions: HashMap<ExpKey, Vec<(String, String)>>,
+    pdf: HashMap<(String, String), u64>,
+}
+
+fn collect_keys(
+    q: &Query,
+    keys: &mut Vec<ExpKey>,
+    phrases: &mut Vec<(Option<String>, Vec<String>)>,
+) {
+    match q {
+        Query::Term { field, term, .. } => keys.push(ExpKey {
+            field: field.clone(),
+            kind: 0,
+            raw: term.clone(),
+            dist: 0,
+        }),
+        Query::Prefix { field, prefix, .. } => keys.push(ExpKey {
+            field: field.clone(),
+            kind: 1,
+            raw: prefix.clone(),
+            dist: 0,
+        }),
+        Query::Fuzzy {
+            field, term, dist, ..
+        } => keys.push(ExpKey {
+            field: field.clone(),
+            kind: 2,
+            raw: term.clone(),
+            dist: *dist,
+        }),
+        Query::Phrase { field, terms, .. } => phrases.push((field.clone(), terms.clone())),
+        Query::And(v) | Query::Or(v) => {
+            for p in v {
+                collect_keys(p, keys, phrases);
+            }
+        }
+        Query::Not(inner) => collect_keys(inner, keys, phrases),
+        Query::MatchAll => {}
+    }
+}
+
+fn expand_kind(kind: u8) -> &'static str {
+    match kind {
+        1 => "prefix",
+        2 => "fuzzy",
+        _ => "term",
+    }
+}
+
+impl QueryStats {
+    pub fn build(snap: &Snapshot, schema: &Schema, opts: &SearchOptions, q: &Query) -> Self {
+        let mut st = QueryStats::default();
+        for f in snap.all_fields() {
+            st.avg.insert(f.clone(), snap.avg_field_len(&f));
+        }
+        let mut keys = Vec::new();
+        let mut phrases = Vec::new();
+        collect_keys(q, &mut keys, &mut phrases);
+        keys.sort();
+        keys.dedup();
+        for k in keys {
+            let terms = expand_term(
+                snap,
+                schema,
+                &k.field,
+                expand_kind(k.kind),
+                &k.raw,
+                k.dist,
+                opts,
+            );
+            for (f, t) in &terms {
+                st.df
+                    .entry((f.clone(), t.clone()))
+                    .or_insert_with(|| snap.df(f, t).max(1));
+            }
+            st.expansions.insert(k, terms);
+        }
+        let mut seen = HashSet::new();
+        for (field, terms) in &phrases {
+            for f in resolve_fields(field, snap, opts) {
+                let pk = (f.clone(), terms.join("\u{1}"));
+                if seen.insert(pk.clone()) {
+                    let df = phrase_df(snap, &f, terms);
+                    st.pdf.insert(pk, df);
+                }
+            }
+        }
+        st
+    }
+    pub fn df_of(&self, field: &str, term: &str) -> u64 {
+        self.df
+            .get(&(field.to_string(), term.to_string()))
+            .copied()
+            .unwrap_or(1)
+    }
+    pub fn avg_of(&self, field: &str) -> f64 {
+        self.avg.get(field).copied().unwrap_or(0.0)
+    }
+    pub fn pdf_of(&self, field: &str, terms: &[String]) -> u64 {
+        self.pdf
+            .get(&(field.to_string(), terms.join("\u{1}")))
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
 /// Evaluate a query on one segment; returns (global_doc, score) pairs.
 fn eval_segment(
     seg: &Segment,
@@ -292,7 +413,7 @@ fn eval_segment(
     schema: &Schema,
     opts: &SearchOptions,
     n: u64,
-    avg_cache: &HashMap<String, f64>,
+    st: &QueryStats,
 ) -> Vec<(u32, f32)> {
     match q {
         Query::MatchAll => seg
@@ -302,7 +423,7 @@ fn eval_segment(
             .map(|&g| (g, 1.0))
             .collect(),
         Query::Not(inner) => {
-            let bad: HashSet<u32> = eval_segment(seg, snap, inner, schema, opts, n, avg_cache)
+            let bad: HashSet<u32> = eval_segment(seg, snap, inner, schema, opts, n, st)
                 .into_iter()
                 .map(|(d, _)| d)
                 .collect();
@@ -318,7 +439,7 @@ fn eval_segment(
             }
             let mut acc: Option<HashMap<u32, f32>> = None;
             for p in parts {
-                let m: HashMap<u32, f32> = eval_segment(seg, snap, p, schema, opts, n, avg_cache)
+                let m: HashMap<u32, f32> = eval_segment(seg, snap, p, schema, opts, n, st)
                     .into_iter()
                     .collect();
                 acc = Some(match acc {
@@ -343,54 +464,51 @@ fn eval_segment(
             // threshold tightens early (pruning inside top-k collection).
             let mut acc: HashMap<u32, f32> = HashMap::new();
             for p in parts {
-                for (d, s) in eval_segment(seg, snap, p, schema, opts, n, avg_cache) {
+                for (d, s) in eval_segment(seg, snap, p, schema, opts, n, st) {
                     *acc.entry(d).or_insert(0.0) += s;
                 }
             }
             acc.into_iter().collect()
         }
-        Query::Term { field, term, boost } => score_clauses(
-            seg,
-            snap,
-            schema,
-            opts,
-            n,
-            avg_cache,
-            &expand_clauses(
-                snap, schema, opts, field, "term", term, 0, *boost, n, avg_cache,
-            ),
-        ),
+        Query::Term { field, term, boost } => {
+            let key = ExpKey {
+                field: field.clone(),
+                kind: 0,
+                raw: term.clone(),
+                dist: 0,
+            };
+            let clauses = expand_clauses(st, schema, opts, &key, *boost, n);
+            score_clauses(seg, snap, schema, opts, n, st, &clauses)
+        }
         Query::Prefix {
             field,
             prefix,
             boost,
-        } => score_clauses(
-            seg,
-            snap,
-            schema,
-            opts,
-            n,
-            avg_cache,
-            &expand_clauses(
-                snap, schema, opts, field, "prefix", prefix, 0, *boost, n, avg_cache,
-            ),
-        ),
+        } => {
+            let key = ExpKey {
+                field: field.clone(),
+                kind: 1,
+                raw: prefix.clone(),
+                dist: 0,
+            };
+            let clauses = expand_clauses(st, schema, opts, &key, *boost, n);
+            score_clauses(seg, snap, schema, opts, n, st, &clauses)
+        }
         Query::Fuzzy {
             field,
             term,
             dist,
             boost,
-        } => score_clauses(
-            seg,
-            snap,
-            schema,
-            opts,
-            n,
-            avg_cache,
-            &expand_clauses(
-                snap, schema, opts, field, "fuzzy", term, *dist, *boost, n, avg_cache,
-            ),
-        ),
+        } => {
+            let key = ExpKey {
+                field: field.clone(),
+                kind: 2,
+                raw: term.clone(),
+                dist: *dist,
+            };
+            let clauses = expand_clauses(st, schema, opts, &key, *boost, n);
+            score_clauses(seg, snap, schema, opts, n, st, &clauses)
+        }
         Query::Phrase {
             field,
             terms,
@@ -398,7 +516,7 @@ fn eval_segment(
         } => {
             let mut acc: HashMap<u32, f32> = HashMap::new();
             for f in resolve_fields(field, snap, opts) {
-                let df_phrase = phrase_df(snap, &f, terms);
+                let df_phrase = st.pdf_of(&f, terms);
                 if df_phrase == 0 {
                     continue;
                 }
@@ -417,7 +535,7 @@ fn eval_segment(
                 if !ok {
                     continue;
                 }
-                let avg = avg_cache.get(&f).copied().unwrap_or(0.0);
+                let avg = st.avg_of(&f);
                 // candidate locals = docs containing every phrase term
                 let mut counts: HashMap<u32, usize> = HashMap::new();
                 for pl in &lists {
@@ -451,30 +569,26 @@ fn eval_segment(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn expand_clauses(
-    snap: &Snapshot,
+    st: &QueryStats,
     schema: &Schema,
     opts: &SearchOptions,
-    field: &Option<String>,
-    kind: &str,
-    raw: &str,
-    dist: u32,
+    key: &ExpKey,
     boost: f32,
     n: u64,
-    avg_cache: &HashMap<String, f64>,
 ) -> Vec<Clause> {
     let mut clauses = Vec::new();
-    for (f, t) in expand_term(snap, schema, field, kind, raw, dist, opts) {
-        let df = snap.df(&f, &t).max(1);
-        let avg = avg_cache.get(&f).copied().unwrap_or(0.0);
+    let empty = Vec::new();
+    for (f, t) in st.expansions.get(key).unwrap_or(&empty) {
+        let df = st.df_of(f, t);
+        let avg = st.avg_of(f);
         // optimistic max: tf=10 at avg length
         let max_score = term_score(10.0, avg as f32, avg, df, n, &opts.scorer)
             * boost
-            * opts.field_boost(schema, &f);
+            * opts.field_boost(schema, f);
         clauses.push(Clause {
-            field: f,
-            term: t,
+            field: f.clone(),
+            term: t.clone(),
             boost,
             max_score,
         });
@@ -489,13 +603,13 @@ fn score_clauses(
     schema: &Schema,
     opts: &SearchOptions,
     n: u64,
-    avg_cache: &HashMap<String, f64>,
+    st: &QueryStats,
     clauses: &[Clause],
 ) -> Vec<(u32, f32)> {
     let mut acc: HashMap<u32, f32> = HashMap::new();
     for c in clauses {
-        let df = snap.df(&c.field, &c.term).max(1);
-        let avg = avg_cache.get(&c.field).copied().unwrap_or(0.0);
+        let df = st.df_of(&c.field, &c.term);
+        let avg = st.avg_of(&c.field);
         if let Some(pl) = seg.postings_for(&c.field, &c.term) {
             for p in pl {
                 let Some(gid) = seg.docs.get(p.doc as usize) else {
@@ -576,17 +690,14 @@ fn phrase_count(lists: &[&[Posting]], local: u32) -> usize {
 /// sorted by (score desc, doc asc).
 pub fn search(snap: &Snapshot, q: &Query, opts: &SearchOptions) -> Vec<Hit> {
     let n = snap.live_count().max(1);
-    let mut avg_cache = HashMap::new();
-    for f in snap.all_fields() {
-        avg_cache.insert(f.clone(), snap.avg_field_len(&f));
-    }
+    let st = QueryStats::build(snap, &snap.schema, opts, q);
     let k = opts.top_k.max(1);
     // one thread per segment (cap 8), merged with a heap
     let mut per_seg: Vec<Vec<(u32, f32)>> = Vec::new();
     let nthreads = snap.segments.len().clamp(1, opts.max_threads.max(1));
     if snap.segments.len() <= 1 || nthreads == 1 {
         for s in &snap.segments {
-            per_seg.push(eval_segment(s, snap, q, &snap.schema, opts, n, &avg_cache));
+            per_seg.push(eval_segment(s, snap, q, &snap.schema, opts, n, &st));
         }
     } else {
         std::thread::scope(|scope| {
@@ -600,11 +711,11 @@ pub fn search(snap: &Snapshot, q: &Query, opts: &SearchOptions) -> Vec<Hit> {
                 cs
             };
             for chunk in chunks {
-                let avg_ref = &avg_cache;
+                let st_ref = &st;
                 handles.push(scope.spawn(move || {
                     let mut out = Vec::new();
                     for s in &chunk {
-                        out.push(eval_segment(s, snap, q, &snap.schema, opts, n, avg_ref));
+                        out.push(eval_segment(s, snap, q, &snap.schema, opts, n, st_ref));
                     }
                     out
                 }));
