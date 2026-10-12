@@ -129,11 +129,32 @@ impl TermDict {
     }
 
     /// All keys with the given prefix (prefix includes "field\x00" part).
+    /// Seeks to the first matching block via the sparse index and stops at
+    /// the first key past the range — never decodes the whole dictionary.
     pub fn scan_prefix(&self, prefix: &str) -> Vec<String> {
-        self.all_keys()
-            .into_iter()
-            .filter(|k| k.starts_with(prefix))
-            .collect()
+        let mut out = Vec::new();
+        if self.index.is_empty() {
+            return out;
+        }
+        // first block whose first key >= prefix; matches may start one block
+        // earlier, so step back (sorted order makes the match range contiguous)
+        let mut lo = self.index.partition_point(|(k, _)| k.as_str() < prefix);
+        lo = lo.saturating_sub(1);
+        for (_, off) in &self.index[lo..] {
+            let mut done = false;
+            for (k, _) in self.decode_block(*off) {
+                if k.starts_with(prefix) {
+                    out.push(k);
+                } else if k.as_str() > prefix {
+                    done = true;
+                    break;
+                }
+            }
+            if done {
+                break;
+            }
+        }
+        out
     }
 }
 
@@ -158,6 +179,25 @@ pub struct Segment {
     pub field_lens: Vec<BTreeMap<String, u32>>,
     pub stored: Vec<BTreeMap<String, String>>,
     pub dict: TermDict,
+    /// Per field: (total tokens, docs containing the field). Computed once
+    /// at build/load/merge so per-query averages never rescan documents.
+    pub field_totals: BTreeMap<String, (u64, u64)>,
+    /// (field, term char length) -> terms. Built in rebuild_aux so fuzzy
+    /// expansion only visits length-compatible buckets, not the whole dict.
+    pub len_buckets: BTreeMap<(String, usize), Vec<String>>,
+}
+
+/// Single pass over per-doc field lengths into (tokens, docs) per field.
+pub fn compute_field_totals(lens: &[BTreeMap<String, u32>]) -> BTreeMap<String, (u64, u64)> {
+    let mut out: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    for m in lens {
+        for (f, len) in m {
+            let e = out.entry(f.clone()).or_insert((0, 0));
+            e.0 += *len as u64;
+            e.1 += 1;
+        }
+    }
+    out
 }
 
 impl Segment {
@@ -186,8 +226,32 @@ impl Segment {
             .map(|k| k[field.len() + 1..].to_string())
             .collect()
     }
+    /// Terms of a field whose char length falls in [lo, hi]. Used for fuzzy
+    /// expansion so only length-compatible buckets are visited.
+    pub fn terms_with_len(&self, field: &str, lo: usize, hi: usize) -> Vec<String> {
+        let mut out = Vec::new();
+        for (_, terms) in self
+            .len_buckets
+            .range((field.to_string(), lo)..=(field.to_string(), hi))
+        {
+            out.extend(terms.iter().cloned());
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
     pub fn all_field_terms(&self, field: &str) -> Vec<String> {
         self.prefix_terms(field, "")
+    }
+    /// (term, df) pairs for one field in a single ordered pass — no
+    /// per-term map lookup or key allocation.
+    pub fn field_terms_with_df(&self, field: &str) -> Vec<(String, u64)> {
+        let lo = (field.to_string(), String::new());
+        let hi = (format!("{field}\u{10ffff}"), String::new());
+        self.postings
+            .range(lo..=hi)
+            .map(|((_, t), pl)| (t.clone(), pl.len() as u64))
+            .collect()
     }
     pub fn avg_field_len(&self, field: &str) -> f64 {
         if self.field_lens.is_empty() {
@@ -313,6 +377,7 @@ impl Segment {
             compressed.insert(key.clone(), eb);
             postings.insert(key, plist);
         }
+        let field_totals = compute_field_totals(&field_lens);
         let mut seg = Segment {
             id,
             docs,
@@ -322,6 +387,8 @@ impl Segment {
             field_lens,
             stored,
             dict: TermDict::default(),
+            field_totals,
+            len_buckets: BTreeMap::new(),
         };
         seg.rebuild_aux();
         let _ = buf;
@@ -337,6 +404,14 @@ impl Segment {
             self.skips
                 .insert(k.clone(), codec::build_skips(plist, &enc, SKIP_EVERY));
         }
+        let mut buckets: BTreeMap<(String, usize), Vec<String>> = BTreeMap::new();
+        for (f, t) in self.postings.keys() {
+            buckets
+                .entry((f.clone(), t.chars().count()))
+                .or_default()
+                .push(t.clone());
+        }
+        self.len_buckets = buckets;
     }
 }
 
@@ -385,6 +460,7 @@ impl SegmentWriter {
             compressed.insert(k.clone(), codec::encode_postings(&plist));
             postings.insert(k.clone(), plist);
         }
+        let field_totals = compute_field_totals(&self.field_lens);
         let mut seg = Segment {
             id,
             docs: self.docs.clone(),
@@ -394,6 +470,8 @@ impl SegmentWriter {
             field_lens: self.field_lens.clone(),
             stored: self.stored.clone(),
             dict: TermDict::default(),
+            field_totals,
+            len_buckets: BTreeMap::new(),
         };
         seg.rebuild_aux();
         seg
@@ -482,6 +560,7 @@ pub fn merge_segments(id: u64, mut segs: Vec<Segment>) -> Segment {
         compressed.insert(key.clone(), codec::encode_postings(&plist));
         postings.insert(key, plist);
     }
+    let field_totals = compute_field_totals(&field_lens);
     let mut seg = Segment {
         id,
         docs,
@@ -491,6 +570,8 @@ pub fn merge_segments(id: u64, mut segs: Vec<Segment>) -> Segment {
         field_lens,
         stored,
         dict: TermDict::default(),
+        field_totals,
+        len_buckets: BTreeMap::new(),
     };
     seg.rebuild_aux();
     seg

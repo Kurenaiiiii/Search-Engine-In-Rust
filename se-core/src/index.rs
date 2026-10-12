@@ -43,6 +43,8 @@ struct Inner {
     buffer: Vec<(u32, BTreeMap<String, String>)>,
     live: HashSet<u32>,
     stored: Arc<BTreeMap<u32, BTreeMap<String, String>>>,
+    /// every field name ever added (superset is harmless for expansion)
+    fields: HashSet<String>,
     next_id: u32,
     next_seg: u64,
     wal: File,
@@ -94,6 +96,7 @@ impl Index {
                 buffer: Vec::new(),
                 live: HashSet::new(),
                 stored: Arc::new(BTreeMap::new()),
+                fields: HashSet::new(),
                 next_id,
                 next_seg,
                 wal,
@@ -116,6 +119,9 @@ impl Index {
             }
             for (gid, fields) in seg_docs {
                 inner.live.insert(gid);
+                for k in fields.keys() {
+                    inner.fields.insert(k.clone());
+                }
                 Arc::make_mut(&mut inner.stored).insert(gid, fields);
             }
             // next_id must exceed any seg doc
@@ -200,6 +206,9 @@ impl Index {
             inner.wal.write_all(&rec)?;
             inner.next_id = id + 1;
             inner.live.insert(id);
+            for k in fields.keys() {
+                inner.fields.insert(k.clone());
+            }
             Arc::make_mut(&mut inner.stored).insert(id, fields.clone());
             inner.buffer.push((id, fields));
             id
@@ -429,18 +438,32 @@ impl Index {
     pub fn snapshot(&self) -> Snapshot {
         let inner = self.inner.read().unwrap();
         let mut segments = inner.segments.clone();
+        let mut buffered = 0u64;
         if !inner.buffer.is_empty() {
             let mut w = SegmentWriter::default();
             for (gid, fields) in &inner.buffer {
                 w.add_doc(*gid, fields, &inner.schema);
             }
+            buffered = inner.buffer.len() as u64;
             segments.push(Arc::new(w.finish(u64::MAX)));
         }
+        let total_docs: u64 = inner
+            .segments
+            .iter()
+            .map(|s| s.docs.len() as u64)
+            .sum::<u64>()
+            + buffered;
+        let mut fields: Vec<String> = inner.fields.iter().cloned().collect();
+        fields.sort();
+        let live_complete = inner.live.len() as u64 == total_docs;
         Snapshot {
             segments,
             live: inner.live.clone(),
             stored: Arc::clone(&inner.stored),
             schema: inner.schema.clone(),
+            fields,
+            total_docs,
+            live_complete,
         }
     }
 
@@ -494,6 +517,9 @@ fn apply_record(inner: &mut Inner, rec: &[u8], rebound: &mut Vec<(u32, BTreeMap<
             }
             inner.next_id = inner.next_id.max(id + 1);
             inner.live.insert(id);
+            for k in m.keys() {
+                inner.fields.insert(k.clone());
+            }
             Arc::make_mut(&mut inner.stored).insert(id, m.clone());
             // if doc already in a segment (replay after partial flush), keep
             // it in buffer too — harmless duplicate filtered by live set...
@@ -566,6 +592,8 @@ fn retain_live(seg: &Segment, live: &HashSet<u32>) -> Segment {
         field_lens: keep.iter().map(|&i| seg.field_lens[i].clone()).collect(),
         stored: keep.iter().map(|&i| seg.stored[i].clone()).collect(),
         dict: Default::default(),
+        field_totals: BTreeMap::new(),
+        len_buckets: BTreeMap::new(),
     };
     for (k, plist) in &seg.postings {
         let mut np = Vec::new();
@@ -582,6 +610,7 @@ fn retain_live(seg: &Segment, live: &HashSet<u32>) -> Segment {
             out.postings.insert(k.clone(), np);
         }
     }
+    out.field_totals = crate::segment::compute_field_totals(&out.field_lens);
     out.rebuild_aux();
     out
 }

@@ -81,22 +81,39 @@ pub fn tfidf(tf: f32, df: u64, n: u64) -> f32 {
 /// means "bigger than cap").
 pub fn edit_distance(a: &str, b: &str, cap: u32) -> u32 {
     let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
+    let mut prev = Vec::new();
+    let mut cur = Vec::new();
+    edit_distance_pre(&a, b, cap, &mut prev, &mut cur)
+}
+
+/// Same as [`edit_distance`] but reuses caller-provided row buffers and a
+/// pre-collected query, so fuzzy expansion over thousands of candidates
+/// allocates once instead of per term.
+pub fn edit_distance_pre(
+    a: &[char],
+    b: &str,
+    cap: u32,
+    prev: &mut Vec<u32>,
+    cur: &mut Vec<u32>,
+) -> u32 {
+    let bc: Vec<char> = b.chars().collect();
     if a.is_empty() {
-        return (b.len() as u32).min(cap + 1);
+        return (bc.len() as u32).min(cap + 1);
     }
-    if b.is_empty() {
+    if bc.is_empty() {
         return (a.len() as u32).min(cap + 1);
     }
-    if a.len().abs_diff(b.len()) as u32 > cap {
+    if a.len().abs_diff(bc.len()) as u32 > cap {
         return cap + 1;
     }
-    let mut prev: Vec<u32> = (0..=b.len() as u32).collect();
-    let mut cur = vec![0u32; b.len() + 1];
+    prev.clear();
+    prev.extend(0..=bc.len() as u32);
+    cur.clear();
+    cur.resize(bc.len() + 1, 0);
     for (i, &ca) in a.iter().enumerate() {
         cur[0] = i as u32 + 1;
         let mut row_min = cur[0];
-        for (j, &cb) in b.iter().enumerate() {
+        for (j, &cb) in bc.iter().enumerate() {
             cur[j + 1] = (prev[j] + u32::from(ca != cb))
                 .min(prev[j + 1] + 1)
                 .min(cur[j] + 1);
@@ -105,9 +122,9 @@ pub fn edit_distance(a: &str, b: &str, cap: u32) -> u32 {
         if row_min > cap {
             return cap + 1;
         }
-        std::mem::swap(&mut prev, &mut cur);
+        std::mem::swap(prev, cur);
     }
-    prev[b.len()]
+    prev[bc.len()]
 }
 
 /// A snapshot of segments searched as one consistent view.
@@ -118,6 +135,12 @@ pub struct Snapshot {
     pub live: HashSet<u32>,
     pub stored: std::sync::Arc<BTreeMap<u32, BTreeMap<String, String>>>,
     pub schema: Schema,
+    /// cached field list (avoids scanning stored docs per query)
+    pub fields: Vec<String>,
+    /// total docs across segments + buffer; when it equals live.len(),
+    /// there are no deletes and per-posting live checks are skipped.
+    pub total_docs: u64,
+    pub live_complete: bool,
 }
 
 impl Snapshot {
@@ -125,20 +148,28 @@ impl Snapshot {
         self.live.len() as u64
     }
     pub fn all_fields(&self) -> Vec<String> {
-        let mut f: HashSet<String> = HashSet::new();
-        for s in &self.segments {
-            for d in &s.stored {
-                for k in d.keys() {
-                    f.insert(k.clone());
+        if self.fields.is_empty() {
+            let mut f: HashSet<String> = HashSet::new();
+            for s in &self.segments {
+                for d in &s.stored {
+                    for k in d.keys() {
+                        f.insert(k.clone());
+                    }
                 }
             }
+            let mut v: Vec<String> = f.into_iter().collect();
+            v.sort();
+            v
+        } else {
+            self.fields.clone()
         }
-        let mut v: Vec<String> = f.into_iter().collect();
-        v.sort();
-        v
     }
-    /// df summed across segments, restricted to live docs.
+    /// df summed across segments, restricted to live docs. With no deletes
+    /// this is just the sum of per-segment posting lengths, O(segments).
     pub fn df(&self, field: &str, term: &str) -> u64 {
+        if self.live_complete {
+            return self.segments.iter().map(|s| s.df(field, term) as u64).sum();
+        }
         let mut n = 0u64;
         for s in &self.segments {
             if let Some(pl) = s.postings_for(field, term) {
@@ -153,8 +184,22 @@ impl Snapshot {
         }
         n
     }
-    /// Average field length over live docs.
+    /// Average field length over live docs. With no deletes this sums the
+    /// per-segment totals cached at flush/merge/load time.
     pub fn avg_field_len(&self, field: &str) -> f64 {
+        let n = self.live_count();
+        if n == 0 {
+            return 0.0;
+        }
+        if self.live_complete {
+            let sum: u64 = self
+                .segments
+                .iter()
+                .filter_map(|s| s.field_totals.get(field))
+                .map(|(t, _)| *t)
+                .sum();
+            return sum as f64 / n as f64;
+        }
         let mut sum = 0u64;
         let mut n = 0u64;
         for s in &self.segments {
@@ -184,12 +229,42 @@ impl Snapshot {
             .unwrap_or(0) as f32
     }
     pub fn all_dict_terms(&self, field: &str) -> Vec<(String, u64)> {
+        if self.live_complete {
+            // single ordered pass per segment; df summed across segments.
+            // (no deletes here, so every list has df >= 1)
+            let mut df: HashMap<String, u64> = HashMap::new();
+            for s in &self.segments {
+                for (t, d) in s.field_terms_with_df(field) {
+                    *df.entry(t).or_insert(0) += d;
+                }
+            }
+            let mut v: Vec<(String, u64)> = df.into_iter().collect();
+            v.sort();
+            return v;
+        }
         let mut df: HashMap<String, u64> = HashMap::new();
         for s in &self.segments {
             for t in s.all_field_terms(field) {
                 let d = self.df(field, &t);
                 if d > 0 {
-                    df.insert(t, d);
+                    *df.entry(t).or_insert(0) += d;
+                }
+            }
+        }
+        let mut v: Vec<(String, u64)> = df.into_iter().collect();
+        v.sort();
+        v
+    }
+    /// Dict terms of a field whose char length is in [lo, hi], with df.
+    /// Only length-compatible buckets are visited — fuzzy expansion never
+    /// scans the whole dictionary.
+    pub fn dict_terms_in_len_range(&self, field: &str, lo: usize, hi: usize) -> Vec<(String, u64)> {
+        let mut df: HashMap<String, u64> = HashMap::new();
+        for s in &self.segments {
+            for t in s.terms_with_len(field, lo, hi) {
+                let d = self.df(field, &t);
+                if d > 0 {
+                    *df.entry(t).or_insert(0) += d;
                 }
             }
         }
@@ -252,9 +327,19 @@ fn expand_term(
                 } else {
                     raw.to_lowercase()
                 };
+                // length buckets first: a match must satisfy
+                // |len(t) - len(q)| <= dist (necessary condition), so only
+                // compatible buckets are visited instead of the whole dict.
+                // The bucket range makes a recount gate redundant; row
+                // buffers and the query chars are reused across candidates.
+                let qc: Vec<char> = q.chars().collect();
+                let lo = qc.len().saturating_sub(dist as usize);
+                let hi = qc.len() + dist as usize;
+                let mut prev = Vec::new();
+                let mut cur = Vec::new();
                 for s in &snap.segments {
-                    for t in s.all_field_terms(&f) {
-                        if edit_distance(&q, &t, dist) <= dist {
+                    for t in s.terms_with_len(&f, lo, hi) {
+                        if edit_distance_pre(&qc, &t, dist, &mut prev, &mut cur) <= dist {
                             out.push((f.clone(), t));
                         }
                     }
@@ -273,6 +358,52 @@ fn term_score(tf: f32, doc_len: f32, avg_len: f64, df: u64, n: u64, scorer: &Sco
     match scorer {
         Scorer::Bm25 { k1, b } => bm25(tf, doc_len, avg_len as f32, df, n, *k1, *b),
         Scorer::Tfidf => tfidf(tf, df, n),
+    }
+}
+
+/// idf part of BM25, hoisted out of per-posting loops (identical result,
+/// one `ln()` per clause instead of one per posting).
+fn bm25_idf(df: u64, n: u64) -> f32 {
+    (((n as f64 - df as f64 + 0.5) / (df as f64 + 0.5)) + 1.0).ln() as f32
+}
+
+fn tfidf_idf(df: u64, n: u64) -> f32 {
+    (1.0 + n as f32 / (df as f32 + 1.0)).ln()
+}
+
+fn bm25_with_idf(tf: f32, doc_len: f32, avg_len: f32, idf: f32, k1: f32, b: f32) -> f32 {
+    let norm = 1.0 - b + b * (doc_len / avg_len.max(1e-6));
+    idf * (tf * (k1 + 1.0)) / (tf + k1 * norm)
+}
+
+fn tfidf_with_idf(tf: f32, idf: f32) -> f32 {
+    (1.0 + tf.ln_1p()) * idf
+}
+
+/// Dense per-segment score accumulator. Local doc ids are dense
+/// (0..doc_count), so scoring writes into a Vec instead of hashing every
+/// posting; only touched docs are visited afterwards.
+struct DenseAcc {
+    scores: Vec<f32>,
+    seen: Vec<bool>,
+    touched: Vec<u32>,
+}
+
+impl DenseAcc {
+    fn new(n: usize) -> Self {
+        Self {
+            scores: vec![0.0; n],
+            seen: vec![false; n],
+            touched: Vec::new(),
+        }
+    }
+    fn add(&mut self, local: u32, s: f32) {
+        let i = local as usize;
+        if !self.seen[i] {
+            self.seen[i] = true;
+            self.touched.push(local);
+        }
+        self.scores[i] += s;
     }
 }
 
@@ -351,8 +482,8 @@ fn expand_kind(kind: u8) -> &'static str {
 impl QueryStats {
     pub fn build(snap: &Snapshot, schema: &Schema, opts: &SearchOptions, q: &Query) -> Self {
         let mut st = QueryStats::default();
-        for f in snap.all_fields() {
-            st.avg.insert(f.clone(), snap.avg_field_len(&f));
+        for f in &snap.fields {
+            st.avg.insert(f.clone(), snap.avg_field_len(f));
         }
         let mut keys = Vec::new();
         let mut phrases = Vec::new();
@@ -405,16 +536,28 @@ impl QueryStats {
     }
 }
 
-/// Evaluate a query on one segment; returns (global_doc, score) pairs.
-fn eval_segment(
-    seg: &Segment,
-    snap: &Snapshot,
-    q: &Query,
-    schema: &Schema,
-    opts: &SearchOptions,
+/// Shared evaluation context: everything except the query node and the
+/// root flag. Passed by reference through the recursive evaluator.
+#[derive(Clone, Copy)]
+struct EvalCtx<'a> {
+    seg: &'a Segment,
+    snap: &'a Snapshot,
+    schema: &'a Schema,
+    opts: &'a SearchOptions,
     n: u64,
-    st: &QueryStats,
-) -> Vec<(u32, f32)> {
+    st: &'a QueryStats,
+}
+
+/// Evaluate a query on one segment; returns (global_doc, score) pairs.
+/// `top` is true only for the root call: only there may MaxScore truncate
+/// to top-k, because And/Not parents need the full matching set.
+fn eval_segment(ctx: &EvalCtx, q: &Query, top: bool) -> Vec<(u32, f32)> {
+    let seg = ctx.seg;
+    let snap = ctx.snap;
+    let schema = ctx.schema;
+    let opts = ctx.opts;
+    let n = ctx.n;
+    let st = ctx.st;
     match q {
         Query::MatchAll => seg
             .docs
@@ -423,7 +566,7 @@ fn eval_segment(
             .map(|&g| (g, 1.0))
             .collect(),
         Query::Not(inner) => {
-            let bad: HashSet<u32> = eval_segment(seg, snap, inner, schema, opts, n, st)
+            let bad: HashSet<u32> = eval_segment(ctx, inner, false)
                 .into_iter()
                 .map(|(d, _)| d)
                 .collect();
@@ -439,9 +582,7 @@ fn eval_segment(
             }
             let mut acc: Option<HashMap<u32, f32>> = None;
             for p in parts {
-                let m: HashMap<u32, f32> = eval_segment(seg, snap, p, schema, opts, n, st)
-                    .into_iter()
-                    .collect();
+                let m: HashMap<u32, f32> = eval_segment(ctx, p, false).into_iter().collect();
                 acc = Some(match acc {
                     None => m,
                     Some(a) => {
@@ -458,13 +599,17 @@ fn eval_segment(
             acc.unwrap_or_default().into_iter().collect()
         }
         Query::Or(parts) => {
-            // MaxScore-lite: score clauses in decreasing max contribution,
-            // skip docs whose optimistic bound can't beat... here we compute
-            // full scores but evaluate high-value clauses first so the
-            // threshold tightens early (pruning inside top-k collection).
+            // Flat disjunctions of plain terms use MaxScore WAND pruning,
+            // but only at the query root: nested parents need full sets.
+            // Anything nested or non-flat falls back to hash accumulation.
+            if top {
+                if let Some(hits) = maxscore_or(ctx, parts) {
+                    return hits;
+                }
+            }
             let mut acc: HashMap<u32, f32> = HashMap::new();
             for p in parts {
-                for (d, s) in eval_segment(seg, snap, p, schema, opts, n, st) {
+                for (d, s) in eval_segment(ctx, p, false) {
                     *acc.entry(d).or_insert(0.0) += s;
                 }
             }
@@ -514,7 +659,7 @@ fn eval_segment(
             terms,
             boost,
         } => {
-            let mut acc: HashMap<u32, f32> = HashMap::new();
+            let mut acc = DenseAcc::new(seg.doc_count());
             for f in resolve_fields(field, snap, opts) {
                 let df_phrase = st.pdf_of(&f, terms);
                 if df_phrase == 0 {
@@ -535,38 +680,92 @@ fn eval_segment(
                 if !ok {
                     continue;
                 }
-                let avg = st.avg_of(&f);
-                // candidate locals = docs containing every phrase term
-                let mut counts: HashMap<u32, usize> = HashMap::new();
-                for pl in &lists {
-                    for p in *pl {
-                        if let Some(gid) = seg.docs.get(p.doc as usize) {
-                            if snap.live.contains(gid) {
-                                *counts.entry(p.doc).or_insert(0) += 1;
+                let boost_f = boost * opts.field_boost(schema, &f);
+                match &opts.scorer {
+                    Scorer::Bm25 { k1, b } => {
+                        let idf = bm25_idf(df_phrase, n);
+                        let avg = st.avg_of(&f) as f32;
+                        for m in intersect_lists(&lists, seg, snap) {
+                            let occ = phrase_count_at(&lists, &m.idx);
+                            if occ == 0 {
+                                continue;
                             }
+                            let dl = snap.doc_field_len(seg, m.doc, &f);
+                            acc.add(
+                                m.doc,
+                                bm25_with_idf(occ as f32, dl, avg, idf, *k1, *b) * boost_f,
+                            );
+                        }
+                    }
+                    Scorer::Tfidf => {
+                        let idf = tfidf_idf(df_phrase, n);
+                        for m in intersect_lists(&lists, seg, snap) {
+                            let occ = phrase_count_at(&lists, &m.idx);
+                            if occ == 0 {
+                                continue;
+                            }
+                            acc.add(m.doc, tfidf_with_idf(occ as f32, idf) * boost_f);
                         }
                     }
                 }
-                for (local, c) in counts {
-                    if c != lists.len() {
-                        continue;
-                    }
-                    let occ = phrase_count(&lists, local);
-                    if occ == 0 {
-                        continue;
-                    }
-                    let dl = snap.doc_field_len(seg, local, &f);
-                    let s = term_score(occ as f32, dl, avg, df_phrase, n, &opts.scorer)
-                        * boost
-                        * opts.field_boost(schema, &f);
-                    if let Some(gid) = seg.docs.get(local as usize) {
-                        *acc.entry(*gid).or_insert(0.0) += s;
-                    }
-                }
             }
-            acc.into_iter().collect()
+            dense_to_global(seg, snap, acc)
         }
     }
+}
+
+/// Local doc ids present in every posting list, with each list's posting
+/// index attached so position checks need no searching.
+struct DocMatch {
+    doc: u32,
+    idx: Vec<usize>,
+}
+
+/// Walks the shortest list and gallops the others (cursors only move
+/// forward: amortized O(total postings)); live docs are filtered here so
+/// callers never hash per posting.
+fn intersect_lists(lists: &[&[Posting]], seg: &Segment, snap: &Snapshot) -> Vec<DocMatch> {
+    if lists.is_empty() {
+        return Vec::new();
+    }
+    let mut order: Vec<usize> = (0..lists.len()).collect();
+    order.sort_by_key(|&i| lists[i].len());
+    let (first, rest) = order.split_first().unwrap();
+    let base = lists[*first];
+    let others: Vec<usize> = rest.to_vec();
+    let mut out = Vec::new();
+    // per-list cursors only move forward: amortized O(total postings)
+    let mut curs = vec![0usize; others.len()];
+    for (bi, p) in base.iter().enumerate() {
+        let doc = p.doc;
+        let mut hit = true;
+        let mut idx = vec![0usize; lists.len()];
+        idx[*first] = bi;
+        for (oi, &li) in others.iter().enumerate() {
+            let ol = lists[li];
+            let mut c = curs[oi];
+            while c < ol.len() && ol[c].doc < doc {
+                c += 1;
+            }
+            curs[oi] = c;
+            if c >= ol.len() || ol[c].doc != doc {
+                hit = false;
+                break;
+            }
+            idx[li] = c;
+        }
+        if !hit {
+            continue;
+        }
+        if snap.live_complete {
+            out.push(DocMatch { doc, idx });
+        } else if let Some(&gid) = seg.docs.get(doc as usize) {
+            if snap.live.contains(&gid) {
+                out.push(DocMatch { doc, idx });
+            }
+        }
+    }
+    out
 }
 
 fn expand_clauses(
@@ -606,30 +805,74 @@ fn score_clauses(
     st: &QueryStats,
     clauses: &[Clause],
 ) -> Vec<(u32, f32)> {
-    let mut acc: HashMap<u32, f32> = HashMap::new();
+    let mut acc = DenseAcc::new(seg.doc_count());
+    let live_check = !snap.live_complete;
     for c in clauses {
         let df = st.df_of(&c.field, &c.term);
-        let avg = st.avg_of(&c.field);
-        if let Some(pl) = seg.postings_for(&c.field, &c.term) {
-            for p in pl {
-                let Some(gid) = seg.docs.get(p.doc as usize) else {
-                    continue;
-                };
-                if !snap.live.contains(gid) {
-                    continue;
+        let avg = st.avg_of(&c.field) as f32;
+        let boost = c.boost * opts.field_boost(schema, &c.field);
+        let Some(pl) = seg.postings_for(&c.field, &c.term) else {
+            continue;
+        };
+        match &opts.scorer {
+            Scorer::Bm25 { k1, b } => {
+                let idf = bm25_idf(df, n);
+                for p in pl {
+                    if live_check {
+                        match seg.docs.get(p.doc as usize) {
+                            Some(gid) if snap.live.contains(gid) => {}
+                            _ => continue,
+                        }
+                    }
+                    let dl = snap.doc_field_len(seg, p.doc, &c.field);
+                    acc.add(
+                        p.doc,
+                        bm25_with_idf(p.freq as f32, dl, avg, idf, *k1, *b) * boost,
+                    );
                 }
-                let dl = snap.doc_field_len(seg, p.doc, &c.field);
-                let s = term_score(p.freq as f32, dl, avg, df, n, &opts.scorer)
-                    * c.boost
-                    * opts.field_boost(schema, &c.field);
-                *acc.entry(*gid).or_insert(0.0) += s;
+            }
+            Scorer::Tfidf => {
+                let idf = tfidf_idf(df, n);
+                for p in pl {
+                    if live_check {
+                        match seg.docs.get(p.doc as usize) {
+                            Some(gid) if snap.live.contains(gid) => {}
+                            _ => continue,
+                        }
+                    }
+                    // TF-IDF needs no length norm: skip the field_lens lookup
+                    acc.add(p.doc, tfidf_with_idf(p.freq as f32, idf) * boost);
+                }
             }
         }
     }
-    acc.into_iter().collect()
+    dense_to_global(seg, snap, acc)
+}
+
+/// Drain a dense accumulator to (global doc, score), applying the live
+/// filter once per touched doc instead of once per posting.
+fn dense_to_global(seg: &Segment, snap: &Snapshot, acc: DenseAcc) -> Vec<(u32, f32)> {
+    let mut out = Vec::with_capacity(acc.touched.len());
+    if snap.live_complete {
+        for local in acc.touched {
+            if let Some(&gid) = seg.docs.get(local as usize) {
+                out.push((gid, acc.scores[local as usize]));
+            }
+        }
+    } else {
+        for local in acc.touched {
+            if let Some(&gid) = seg.docs.get(local as usize) {
+                if snap.live.contains(&gid) {
+                    out.push((gid, acc.scores[local as usize]));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Global phrase df: live docs in any segment containing the exact phrase.
+/// Same galloping intersection as eval, without scoring.
 fn phrase_df(snap: &Snapshot, field: &str, terms: &[String]) -> u64 {
     let mut n = 0u64;
     for seg in &snap.segments {
@@ -647,18 +890,8 @@ fn phrase_df(snap: &Snapshot, field: &str, terms: &[String]) -> u64 {
         if !ok {
             continue;
         }
-        let mut counts: HashMap<u32, usize> = HashMap::new();
-        for pl in &lists {
-            for p in *pl {
-                if let Some(gid) = seg.docs.get(p.doc as usize) {
-                    if snap.live.contains(gid) {
-                        *counts.entry(p.doc).or_insert(0) += 1;
-                    }
-                }
-            }
-        }
-        for (local, c) in counts {
-            if c == lists.len() && phrase_count(&lists, local) > 0 {
+        for m in intersect_lists(&lists, seg, snap) {
+            if phrase_count_at(&lists, &m.idx) > 0 {
                 n += 1;
             }
         }
@@ -666,24 +899,172 @@ fn phrase_df(snap: &Snapshot, field: &str, terms: &[String]) -> u64 {
     n
 }
 
-fn phrase_count(lists: &[&[Posting]], local: u32) -> usize {
-    let mut pos_sets: Vec<&Vec<u32>> = Vec::new();
-    for pl in lists {
-        match pl.iter().find(|p| p.doc == local) {
-            Some(p) => pos_sets.push(&p.positions),
-            None => return 0,
-        }
-    }
-    let first = pos_sets[0];
-    let rest = &pos_sets[1..];
+fn phrase_count_at(lists: &[&[Posting]], idx: &[usize]) -> usize {
+    let first = &lists[0][idx[0]].positions;
+    let rest = &lists[1..];
+    let ridx = &idx[1..];
     first
         .iter()
         .filter(|&&base| {
-            rest.iter()
-                .enumerate()
-                .all(|(i, ps)| ps.binary_search(&(base + i as u32 + 1)).is_ok())
+            rest.iter().enumerate().all(|(i, pl)| {
+                pl[ridx[i]]
+                    .positions
+                    .binary_search(&(base + i as u32 + 1))
+                    .is_ok()
+            })
         })
         .count()
+}
+
+/// MaxScore dynamic pruning for a flat disjunction of plain terms.
+/// Clauses are visited most-promising first; each candidate doc carries an
+/// optimistic bound (exact partial score + max of the rest) and docs whose
+/// bound falls below the current top-k threshold are skipped without full
+/// scoring. Skipping is exact: pruned docs provably cannot enter the top-k,
+/// so matching sets and scores are identical to dense evaluation.
+fn maxscore_or(ctx: &EvalCtx, parts: &[Query]) -> Option<Vec<(u32, f32)>> {
+    let seg = ctx.seg;
+    let snap = ctx.snap;
+    let schema = ctx.schema;
+    let opts = ctx.opts;
+    let n = ctx.n;
+    let st = ctx.st;
+    // only flat Term disjunctions take this path
+    let mut term_parts = Vec::new();
+    for p in parts {
+        match p {
+            Query::Term { field, term, boost } => {
+                term_parts.push((field.clone(), term.clone(), *boost))
+            }
+            _ => return None,
+        }
+    }
+    struct Cursor<'a> {
+        field: String,
+        boost: f32,
+        idf: f32,
+        max_score: f32,
+        list: &'a [Posting],
+        cur: usize,
+    }
+    let mut clauses: Vec<Cursor> = Vec::new();
+    for (field, term, boost) in &term_parts {
+        let key = ExpKey {
+            field: field.clone(),
+            kind: 0,
+            raw: term.clone(),
+            dist: 0,
+        };
+        for c in expand_clauses(st, schema, opts, &key, *boost, n) {
+            if let Some(pl) = seg.postings_for(&c.field, &c.term) {
+                if pl.is_empty() {
+                    continue;
+                }
+                let df = st.df_of(&c.field, &c.term);
+                let idf = match &opts.scorer {
+                    Scorer::Bm25 { .. } => bm25_idf(df, n),
+                    Scorer::Tfidf => tfidf_idf(df, n),
+                };
+                clauses.push(Cursor {
+                    field: c.field.clone(),
+                    boost: c.boost * opts.field_boost(schema, &c.field),
+                    idf,
+                    max_score: c.max_score,
+                    list: pl,
+                    cur: 0,
+                });
+            }
+        }
+    }
+    if clauses.is_empty() {
+        return Some(Vec::new());
+    }
+    // most promising first (expand_clauses already sorts, flattening keeps it
+    // near-sorted; re-sort to be exact)
+    clauses.sort_by(|a, b| b.max_score.partial_cmp(&a.max_score).unwrap());
+    let total_max: f32 = clauses.iter().map(|c| c.max_score).sum();
+    let k = opts.top_k.max(1);
+    // min-heap of (reversed score bits, doc): worst kept hit on top.
+    // scores are always >= 0, where to_bits order matches numeric order.
+    let mut heap: std::collections::BinaryHeap<(std::cmp::Reverse<u32>, u32)> =
+        std::collections::BinaryHeap::new();
+    let threshold = |heap: &std::collections::BinaryHeap<(std::cmp::Reverse<u32>, u32)>| -> f32 {
+        if heap.len() < k {
+            0.0
+        } else {
+            f32::from_bits(heap.peek().map(|(r, _)| r.0).unwrap_or(0))
+        }
+    };
+    let avg_of = |field: &str| st.avg_of(field) as f32;
+    loop {
+        // next candidate = smallest doc under any cursor
+        let mut d = u32::MAX;
+        for c in &clauses {
+            if c.cur < c.list.len() {
+                d = d.min(c.list[c.cur].doc);
+            }
+        }
+        if d == u32::MAX {
+            break;
+        }
+        let t = threshold(&heap);
+        let mut partial = 0.0f32;
+        let mut rem = total_max;
+        let mut pruned = false;
+        for c in clauses.iter_mut() {
+            while c.cur < c.list.len() && c.list[c.cur].doc < d {
+                c.cur += 1;
+            }
+            if c.cur < c.list.len() && c.list[c.cur].doc == d {
+                let p = &c.list[c.cur];
+                let s = match &opts.scorer {
+                    Scorer::Bm25 { k1, b } => {
+                        let dl = snap.doc_field_len(seg, p.doc, &c.field);
+                        bm25_with_idf(p.freq as f32, dl, avg_of(&c.field), c.idf, *k1, *b)
+                    }
+                    Scorer::Tfidf => tfidf_with_idf(p.freq as f32, c.idf),
+                } * c.boost;
+                partial += s;
+            }
+            rem -= c.max_score;
+            if partial + rem < t {
+                pruned = true;
+                break;
+            }
+        }
+        // advance every cursor sitting on d (pruned or scored, d is settled)
+        for c in clauses.iter_mut() {
+            if c.cur < c.list.len() && c.list[c.cur].doc == d {
+                c.cur += 1;
+            }
+        }
+        if pruned {
+            continue;
+        }
+        let live_ok = match seg.docs.get(d as usize) {
+            Some(&gid) => {
+                if !snap.live_complete && !snap.live.contains(&gid) {
+                    None
+                } else {
+                    Some(gid)
+                }
+            }
+            None => None,
+        };
+        if let Some(gid) = live_ok {
+            heap.push((std::cmp::Reverse(partial.to_bits()), gid));
+            if heap.len() > k {
+                heap.pop();
+            }
+        }
+    }
+    let mut out: Vec<(u32, f32)> = heap
+        .into_iter()
+        .map(|(r, gid)| (gid, f32::from_bits(r.0)))
+        .collect();
+    // restore deterministic order for downstream merging
+    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then_with(|| a.0.cmp(&b.0)));
+    Some(out)
 }
 
 /// Search a snapshot, multi-threaded across segments. Returns top-k hits
@@ -697,7 +1078,15 @@ pub fn search(snap: &Snapshot, q: &Query, opts: &SearchOptions) -> Vec<Hit> {
     let nthreads = snap.segments.len().clamp(1, opts.max_threads.max(1));
     if snap.segments.len() <= 1 || nthreads == 1 {
         for s in &snap.segments {
-            per_seg.push(eval_segment(s, snap, q, &snap.schema, opts, n, &st));
+            let ctx = EvalCtx {
+                seg: s,
+                snap,
+                schema: &snap.schema,
+                opts,
+                n,
+                st: &st,
+            };
+            per_seg.push(eval_segment(&ctx, q, true));
         }
     } else {
         std::thread::scope(|scope| {
@@ -715,7 +1104,15 @@ pub fn search(snap: &Snapshot, q: &Query, opts: &SearchOptions) -> Vec<Hit> {
                 handles.push(scope.spawn(move || {
                     let mut out = Vec::new();
                     for s in &chunk {
-                        out.push(eval_segment(s, snap, q, &snap.schema, opts, n, st_ref));
+                        let ctx = EvalCtx {
+                            seg: s,
+                            snap,
+                            schema: &snap.schema,
+                            opts,
+                            n,
+                            st: st_ref,
+                        };
+                        out.push(eval_segment(&ctx, q, true));
                     }
                     out
                 }));
@@ -726,26 +1123,47 @@ pub fn search(snap: &Snapshot, q: &Query, opts: &SearchOptions) -> Vec<Hit> {
         });
     }
     // merge + top-k with threshold pruning
+    if per_seg.len() == 1 {
+        // single segment: top-k straight from its hits, no hash merge
+        let hits: Vec<Hit> = per_seg
+            .pop()
+            .unwrap()
+            .into_iter()
+            .map(|(doc, score)| Hit { doc, score })
+            .collect();
+        return top_k_hits(hits, k);
+    }
     let mut acc: HashMap<u32, f32> = HashMap::new();
     for v in per_seg {
         for (d, s) in v {
             *acc.entry(d).or_insert(0.0) += s;
         }
     }
-    top_k(acc, k)
+    top_k_hits(
+        acc.drain().map(|(doc, score)| Hit { doc, score }).collect(),
+        k,
+    )
 }
 
-fn top_k(mut acc: HashMap<u32, f32>, k: usize) -> Vec<Hit> {
-    // MaxScore-style cutoff: once sorted, docs past k are pruned. Scores are
-    // exact; pruning only drops docs that cannot be in the top-k.
-    let mut hits: Vec<Hit> = acc.drain().map(|(doc, score)| Hit { doc, score }).collect();
+fn top_k_hits(mut hits: Vec<Hit>, k: usize) -> Vec<Hit> {
+    let k = k.max(1);
+    // select_nth avoids a full sort; ties are impossible (docs unique), so
+    // the result is deterministic after the final top-k sort.
+    if hits.len() > k {
+        hits.select_nth_unstable_by(k, |a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap()
+                .then_with(|| a.doc.cmp(&b.doc))
+        });
+        hits.truncate(k);
+    }
     hits.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap()
             .then_with(|| a.doc.cmp(&b.doc))
     });
-    hits.truncate(k);
     hits
 }
 
@@ -861,6 +1279,9 @@ mod tests {
             live: [0, 1, 2].into_iter().collect(),
             stored: std::sync::Arc::new(BTreeMap::new()),
             schema,
+            fields: vec!["body".to_string(), "title".to_string()],
+            total_docs: 3,
+            live_complete: true,
         }
     }
 
