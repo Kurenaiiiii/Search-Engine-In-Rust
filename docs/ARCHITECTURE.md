@@ -54,7 +54,13 @@ Tiered merging (`merge_tier`, 2 smallest segments at a time; `merge_all` for
 small indexes; `se-cli optimize` loops the tier policy) unions doc lists
 sorted by global id (good delta compression), remaps local ids with a
 sort-based pass, and drops tombstoned docs. Merging 100×1k-doc wiki segments
-yielded one 60 MB inverted index from 75 MB of fragments.
+yielded one 60 MB inverted index from 75 MB of fragments. Flush builds and
+merge gathers parallelize analysis and per-term work across up to 4 threads
+(`build_segment_parallel`, scoped term slices); skip tables are walked
+straight from the encoded bytes so flush/merge never pay a second encode
+pass. Each segment also caches per-field token totals and term-length
+buckets at build/load/merge time, so queries never rescan documents for
+statistics.
 
 ## 5. BM25 — worked numeric example
 
@@ -67,42 +73,60 @@ Take `tf=2, dl=100, avg=120, df=5, N=100000`:
 `score = 9.8082 · 4.4/(2 + 1.05) = 14.1495`
 — exactly what `bm25()` returns. Per-field boosts multiply the term weight;
 TF-IDF (`(1+ln tf)·ln(1+N/(df+1))`) is a `--scorer`/`scorer=` option.
-Top-k is an exact sort-and-truncate with deterministic `(score desc, doc
-asc)` order; per-search precomputed stats plus a MaxScore-style clause
-ordering keep common queries fast. Expansion (prefix/fuzzy), df and
-phrase-df are computed once per search in `QueryStats`, not once per
-segment.
+The idf factor is hoisted out of per-posting loops (bit-identical results).
+Scoring writes into dense per-segment accumulators (local ids are dense);
+cross-segment hits merge by hash only when needed; top-k uses
+`select_nth` + a final sort with deterministic `(score desc, doc asc)`
+order. Expansion (prefix/fuzzy), df and phrase-df are computed once per
+search in `QueryStats`, not once per segment. Root-level flat term
+disjunctions run MaxScore WAND pruning (exact: pruned docs provably cannot
+enter the top-k); nested queries use full-set dense evaluation so `And`/`Not`
+parents stay correct — a truncation-inside-composition bug caught in testing
+is documented in LEARNING.md.
 
 ## 6. Durability — WAL (`index.rs`)
 
 Every mutation appends a length-prefixed binary record (`ADD`/`DEL`) to
 `wal.log` before touching memory. Flush writes the new segment file, fsyncs,
 then atomically rewrites `MANIFEST` (segment list + `wal_applied` offset).
+After each flush a checkpoint drops the covered log prefix while preserving
+any uncheckpointed tail (staged aside, offset reset, atomic rename); the
+checkpoint is vetoed while a tombstoned doc is still stored, since its DEL
+is the only durable copy — dropping it would resurrect the doc (both the
+bug and the veto are covered by tests).
 Recovery = load manifest segments + replay newer WAL records. Crash points
 are covered by tests at flush-write, flush-commit, merge-write and
 merge-commit. Files in `segments/` not listed in the manifest (crashed-merge
-leftovers) are deleted on open. The WAL is never truncated yet (roadmap).
+leftovers) and staged `wal.log.tmp` files are deleted on open. Measured:
+`add()` costs 7 µs/doc (WAL write included), so there is no write batching —
+fsync stays once per flush, which is where group commit already happens.
 
 ## 7. Query language (`query.rs`)
 
 Hand-written lexer + recursive-descent parser (`OR` lowest, `AND`/`NOT`
-and juxtaposition above it, atoms at the bottom). Every syntax error names
-the problem and the fix, e.g. `missing closing ')'`, `edit distance 5 too
-large: max is 2`, `empty prefix: need a character before *`.
+above it, atoms at the bottom). Pure free text (bare terms with no
+operators, quotes, parens or fields) parses to `Should` — a scored
+disjunction with `minimum_should_match`; anything explicit parses strict.
+Every syntax error names the problem and the fix, e.g. `missing closing
+')'`, `edit distance 5 too large: max is 2`, `empty prefix: need a
+character before *`.
 
 ## 8. Design trade-offs (honest)
 
 - **Decoded postings resident in RAM** (1.6 GB RSS for 100k wiki docs):
-  fast iteration, huge footprint. Chosen for simplicity; a block-decoded
-  layout would cut RAM ~10× at some CPU cost.
-- **No dynamic pruning yet** (WAND/MaxScore is ordering-only): every
-  candidate doc is scored — the main reason queries cost ~100 ms where
-  Tantivy costs ~0.2 ms. Correctness/oracle parity came first.
-- **Global stats per search** (`avg_field_len` scans all docs): fine at
-  100k docs, a real cost beyond that — incrementally maintained
-  field-length sums are the fix.
-- **Single-writer WAL with full fsync per flush**: durable but caps
-  indexing at ~540 docs/s. Group commit would raise throughput a lot.
-- **Implicit AND for multi-term queries**: precise for keyword search,
-  terrible for verbose natural-language queries (BEIR raw 0.007 vs
-  OR-variant 0.514). SHOULD clauses are the roadmap fix.
+  fast iteration, huge footprint. With resident decoded lists, gallop via
+  binary search is already optimal, so block-decode + skip-pointer
+  traversal was deliberately skipped (skips are still maintained, tested,
+  and ready for an on-disk layout that would cut RAM ~10× at some CPU cost).
+- **MaxScore WAND only at the query root** for flat term disjunctions:
+  truncating inside `And`/`Not` composition would corrupt results (caught
+  by testing); nested queries pay full dense evaluation.
+- **Per-segment field totals cached** at build/load/merge (plus a
+  no-deletes fast path) instead of per-query scans; deletes fall back to
+  exact scans. Same for df.
+- **Single-writer WAL with fsync per flush**: durable; indexing measured at
+  726 docs/s on 4 cores (parallel flush/merge builds bought 1.3×).
+- **Merges are 2-smallest-at-a-time, streaming** (borrowed inputs, inline
+  tombstone filtering, parallel term gather): full 100→1 merge peaked at
+  ~4.5 GB here vs 5.8 GB before, with identical results (merge-equivalence
+  tests).

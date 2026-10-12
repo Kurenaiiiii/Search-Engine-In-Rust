@@ -55,12 +55,15 @@ codebase. Short answers — the code is the long answer.
     acts as tf in BM25; df = docs containing the whole phrase (global,
     exact — including repeated-term phrases like `"a a"`).
 11. **Term vs OR-variant BEIR gap (0.007 → 0.514)?** Implicit AND
-    over-constrains verbose queries; ranking was fine, candidate generation
-    was the gap.
-12. **How do prefix queries work?** `scan_prefix` over the front-coded dict
-    per field, then normal BM25 over expanded terms (summed).
-13. **How do fuzzy queries work?** Levenshtein with early exit over each
-    field's dict terms (cap 2), then BM25 over matches.
+    over-constrained verbose queries; ranking was fine, candidate generation
+    was the gap. v0.2.0 made default-OR the engine behavior (raw queries now
+    score 0.480 nDCG@10 vs published BM25 0.620).
+12. **How do prefix queries work?** Range scan on the front-coded dict via
+    the block index (seek + early stop, never a full decode), then BM25 over
+    expanded terms (summed).
+13. **How do fuzzy queries work?** Length buckets restrict candidates to
+    compatible lengths, then Levenshtein with early exit and reused row
+    buffers (cap 2), then BM25 over matches.
 14. **What does `QueryStats` precompute and why?** Expansion union, df,
     avg field length, phrase df — once per search, because per-segment
     recomputation was quadratic in segment count (measured 4.5× win).
@@ -75,9 +78,29 @@ codebase. Short answers — the code is the long answer.
     brute-force oracle's set/order exactly and scores within 1e-3 relative.
 18. **What does the merge-equivalence test prove?** Same query before/after
     `merge_all` returns identical hits — merging never loses or distorts.
-19. **Why is SQLite ~1000× faster per query?** Block-coded lists with real
-    MAV/WAND pruning, no per-query snapshot/stats work, mature C loops vs
-    our per-doc `HashMap` accumulation. All measured, all reported.
+19. **Why is SQLite still 10–100× faster per query?** Block-coded lists,
+    mature C loops, no per-query setup vs our snapshot + stats + hash
+    merges. The gap narrowed from ~1000× to ~10–100× (term queries now
+    match Tantivy); fuzzy and complement scoring remain weak. All measured,
+    all reported.
 20. **Biggest honest weakness?** RAM: decoded postings + positions resident
-    (1.6 GB per 100k wiki docs); merging to one segment peaked at 5.8 GB.
-    Fix direction: block-decoded postings + incremental stats.
+    (1.6 GB per 100k wiki docs); merging 100 segments to one peaked at
+    ~4.5 GB. Fix direction: block-decoded postings.
+
+## v0.2.0 addendum
+
+21. **What did profiling actually find?** Eval was already ~ms; stats setup
+    dominated (df scans, a 1.29 s all-terms enumeration, 39 ms field scans).
+    Fix the measured hog, not the suspected one.
+22. **What was the WAND truncation bug?** Pruning an `Or` to top-k inside
+    `And` composition dropped docs the parent needed (`(king OR queen) AND
+    england` went 10 hits → 1). Rule: truncate only at the query root.
+23. **What was the WAL resurrection bug?** Truncating the whole log dropped
+    DELs of still-stored docs, resurrecting them on reopen. Rule: veto
+    truncation while any tombstone is still stored; preserve the tail.
+24. **Why no block-decode + skip traversal?** Postings are decoded-resident,
+    where gallop/binary-search is already optimal — a decode layer would add
+    machinery for zero gain. Skips stay maintained and tested.
+25. **How does `minimum_should_match` count?** Per free-text part (a
+    multi-term prefix/fuzzy part counts once), summed scores like OR,
+    engine and oracle identical.

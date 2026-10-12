@@ -55,13 +55,16 @@ curl 'localhost:3000/api/search?q=rust&k=5&highlight=1'
 ```
 
 Parameters: `q` (required, max 4096 chars), `k` (default 10, max 100),
-`offset`, `fields=title,body`, `highlight=1`, `scorer=tfidf`.
+`offset`, `fields=title,body`, `highlight=1`, `scorer=tfidf`,
+`msm=N` (minimum_should_match for free-text queries, default 1).
 POST also works with `{"q":"..."}`. Unknown `q` syntax returns 400 with the
 parser message, e.g. `{"error":"unterminated quoted phrase: missing closing \""}`.
 Single-term queries with zero hits may include `"did_you_mean":"..."`.
 
-Query language: `AND OR NOT`, parentheses, `"quoted phrases"`, `field:term`,
-`prefix*`, `term~N` (N = 0..2), `term^boost`. Juxtaposition is AND.
+Query language: plain words default to scored OR (`msm` sets how many must
+match); `AND OR NOT`, parentheses, `"quoted phrases"`, `field:term`,
+`prefix*`, `term~N` (N = 0..2), `term^boost` keep strict boolean semantics.
+Juxtaposition with any operator/quote/paren/field present is AND.
 
 ## Suggest / spellcheck
 

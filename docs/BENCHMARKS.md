@@ -1,97 +1,115 @@
-# Benchmarks: methodology and raw results
+# Benchmarks: methodology and raw results (v0.2.0)
 
-All numbers below were measured on this machine and are checked into
-`bench/results/` as JSON. Nothing here is estimated or tuned after the fact:
-the query set (`tools/bench_queries.txt`) and the benchmark scripts were
-committed before the runs, and every engine change was committed before its
-re-run (see git history for before/after).
+All numbers below were measured on this machine. The query set
+(`tools/bench_queries.txt`) and the benchmark scripts were frozen before
+the v0.1.0 runs and have not been touched since; the v0.2.0 work re-ran the
+identical benchmark (plus the same manual merged-index steps) in full:
+3 trials before, 3 trials after, medians reported.
+Raw JSON: `bench/results/before/` and `bench/results/after/`
+(`median.json` + per-run files incl. load snapshots).
 
-## Machine
+## Machine and noise
 
-- 4 × Intel Xeon E5-2699 v4 @ 2.20 GHz, 8 GB RAM
-- `rustc 1.99.0`, release profile (`cargo build --release`)
+- 4 × Intel Xeon E5-2699 v4 @ 2.20 GHz, 8 GB RAM, `rustc 1.99.0`, release.
+- Shared VPS: per-trial load averages ranged 0.2–1.6 (other tenants
+  active; each run's `load_before.txt`/`load_after.txt` records it).
+  Mitigation: 20 iterations per query (p50/p95/p99), median of 3 full
+  trials. Single-digit-% deltas should be read as noise; all reported
+  v0.2.0 wins are 7× or more.
 
 ## Corpus
 
 100,000 documents from Simple English Wikipedia
 (`simplewiki-latest-pages-articles.xml.bz2`, CC BY-SA 3.0 / GFDL —
 attribution: Wikipedia contributors, via dumps.wikimedia.org),
-parsed to `{title, body}` JSON lines, 140 MB raw.
-Generator: `tools/make_corpus.py` (seed 42). The corpus itself is **not**
-committed (too large); regenerate with the script.
+parsed to `{title, body}` JSON lines, 140 MB raw, byte-identical across
+rounds (139,970,137 bytes). Generator: frozen `tools/make_corpus.py`.
+The corpus itself is **not** committed; regenerate with the script.
 
-## Indexing throughput (100k docs)
+## Indexing throughput (100k docs, median of 3)
 
 | engine | time | docs/s | index size |
 |---|---|---|---|
-| search-engine-in-rust | 185.2 s | **540** | 60 MB inverted (postings 57.7 + dict 2.7) + 141 MB stored fields + 138 MB WAL = 339 MB dir |
-| sqlite-fts5 | 11.1 s | 9,009 | 249 MB |
-| tantivy 0.24 (in-RAM) | 3.3 s | 30,303 | n/a (in-RAM bench) |
+| v0.1.0 | 183.4 s | 545 | 60 MB inverted + 141 MB stored + 138 MB WAL |
+| v0.2.0 | 137.7 s | 726 (1.33×) | 60 MB inverted + 141 MB stored + **0 MB WAL** |
+| sqlite-fts5 | 11.4 → 11.6 s | ~8,700 | 249 MB |
+| tantivy 0.24 (in-RAM) | 3.40 → 3.42 s | ~29,300 | n/a (in-RAM bench) |
 
-Why we are slower: one WAL record + fsync per flush window, per-doc
-`BTreeMap` indexing overhead in the write path, and varint/positional
-encoding in Rust vs SQLite/Tantivy's batched C/Rust writers. Durability
-(fsync per flush) is a deliberate cost. WAL truncation on checkpoint is not
-implemented yet, so the WAL (138 MB) duplicates the raw corpus — see
-Limitations in the README.
+(sqlite/tantivy re-measured each round as a noise control — unchanged, as
+expected for untouched engines.) WAL checkpoint truncation removed the
+whole 138 MB log; merges run 184.1 → 141.6 s (1.30×, 99 tiered rounds).
+Peak RSS during index+merge+bench was ~4.5 GB (indicative, 1 Hz sampling);
+search alone peaks at 1.6 GB (decoded postings + positions resident).
 
-Memory: search peak RSS 1.6 GB (decoded postings + positions resident);
-merging 4×25k-doc segments peaks at 5.8 GB (this machine's ceiling — merging
-to one segment barely fits; see `optimize` notes below).
+Why indexing is still slower: analysis + map inserts dominate (measured:
+`add()` is 7 µs/doc; `flush()` was 1.45 ms/doc). Parallel flush/merge
+bought 1.3× on 4 cores; the rest is serial sort/encode/fsync plus
+per-token Rust overhead vs batched C writers. WAL `write_all` per doc is
+~0.1% of index time, so no batching was added — fsync stays once per flush
+(group commit where it matters).
 
-## Query latency (merged 1-segment index, top-10, 20 iterations)
+## Query latency (merged 1-segment index, top-10, p50/p95/p99 ms, 8 threads)
 
-p50 / p95 / p99 in milliseconds, multi-threaded (8 threads; single-thread is
-within ±5% on one segment — see raw JSON).
+Single-thread is within ±5% on one segment (see `*_st.json`).
 
-| query | type | ours p50 | ours p95 | sqlite p50 | tantivy p50 |
-|---|---|---|---|---|---|
-| `history` | term | 98.1 | 130.3 | 0.29 | 0.24 |
-| `city river` | AND | 136.7 | 151.1 | 0.21 | 0.49 |
-| `king AND queen` | AND | 133.6 | 151.4 | 0.14 | 0.31 |
-| `king OR queen` | OR | 135.0 | 143.2 | 0.09 | 0.21 |
-| `"united states"` | phrase | 1275.1 | 1316.9 | 0.15 | 2.63 |
-| `"world war"` | phrase | 189.2 | 226.4 | 0.14 | 0.62 |
-| `hist*` | prefix | 275.2 | 282.1 | 1.82 | 0.02 |
-| `histroy~1` | fuzzy | 420.0 | 460.8 | n/a (0 hits) | 0.01 (0 hits) |
-| `title:history` | field | 57.4 | 62.8 | 0.10 | 0.01 |
-| `(king OR queen) AND england` | nested | 170.0 | 187.6 | 0.18 | 0.35 |
-| `NOT war` | NOT | 109.2 | 116.6 | syntax err | parse err |
-| `england` | term | 95.1 | 144.3 | 0.06 | 0.13 |
+| query | type | v0.1.0 p50 | v0.2.0 p50 | speedup | sqlite | tantivy |
+|---|---|---|---|---|---|---|
+| `history` | term | 106.1 | 0.78 | 135× | 0.29 | 0.39 |
+| `city river` | free text¹ | 149.7 | 0.70 | 214× | 0.20 | 0.68 |
+| `king AND queen` | AND | 141.4 | 1.01 | 140× | 0.14 | 0.47 |
+| `king OR queen` | OR | 145.8 | 0.33 | 446× | 0.08 | 0.32 |
+| `"united states"` | phrase | 1268.0 | 7.99 | 159× | 0.15 | 2.53 |
+| `"world war"` | phrase | 200.1 | 1.47 | 136× | 0.14 | 0.62 |
+| `hist*` | prefix | 291.5 | 1.37 | 213× | 1.83 | 0.04 |
+| `histroy~1` | fuzzy | 428.7 | 59.1 | 7× | n/a (0 hits) | 0.02 (0 hits) |
+| `title:history` | field | 62.6 | 0.09 | 680× | 0.10 | 0.01 |
+| `(king OR queen) AND england` | nested | 191.5 | 1.99 | 96× | 0.17 | 0.56 |
+| `NOT war` | NOT | 122.7 | 7.62 | 16× | syntax err | parse err |
+| `england` | term | 105.4 | 0.58 | 182× | 0.05 | 0.13 |
 
-Raw: `bench/results/latency_merged_mt.json` (multi),
-`latency_merged_st.json` (single), `sqlite.json`, `tantivy.json`.
-Charts: `docs/latency.svg`, `docs/comparison.svg`, `docs/throughput.svg`
-(generated by `tools/charts.py`, hand-written SVG, no dependencies).
+¹ `city river` changed AND→OR semantics by design (free-text default);
+same string, intendedly different matching set.
 
-Why we are ~100–1000× slower per query: per-query snapshot + global stat
-scan, `HashMap<u32, f32>` score accumulation over tens of thousands of docs
-(no block-max/WAND pruning yet), no skip-guided phrase intersections, and a
-decoded in-memory layout with per-posting `Vec` overhead. Correctness and
-matching-set parity with the brute-force oracle were prioritized over speed;
-the comparison section is honest about the gap and its causes.
+Unmerged (100 segments) p50 also improved across the board, e.g. `history`
+116.3 → 2.29 ms, `"world war"` 994.6 → 2.94 ms, `histroy~1` 1538.6 →
+282.3 ms — per-segment overhead is gone from stats, not just eval.
 
-Multi-segment note: with 100 unmerged segments, term queries cost ~260 ms
-p50 (`latency_multi.json`); merging to one segment brought them to ~100 ms.
-`se-cli optimize` performs tiered 2-at-a-time merges.
+What changed (all committed before the after-runs): per-segment field
+totals cached at build/load/merge (avg in O(segments)); df via posting
+lengths with a no-deletes fast path; prefix range scans on the dict block
+index; fuzzy length buckets + scratch-buffer edit distance; dense
+per-segment accumulators with hoisted idf; galloping phrase intersection
+returning posting indices; real MaxScore WAND for root-level term
+disjunctions; `select_nth` top-k. Decoded-resident postings were deliberately
+kept, so block-decode + skip-pointer traversal was skipped as pointless
+here (documented in ARCHITECTURE.md).
 
-## Relevance (BEIR SciFact)
+Where we still lose: term/OR queries now match Tantivy (`city river`
+0.70 vs 0.68 ms; `king OR queen` 0.33 vs 0.32 ms), while SQLite stays
+10–100× faster on most queries and prefix (`hist*` 1.37 vs 0.04 ms),
+fuzzy (`histroy~1` 59 ms) and `NOT`
+complement scoring (7.6 ms) remain weak spots — edit distance over buckets
+instead of an automaton, two-pass phrase scoring, hash cross-segment
+merges. All stated plainly; oracle parity held throughout (47 tests).
+
+## Relevance (BEIR SciFact, raw queries, no rewrite)
 
 - Dataset: BEIR SciFact test, 5,183 docs / 300 queries, downloaded from
   https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip
   (BEIR: Thakur et al., https://github.com/beir-cellar/beir).
-- Raw queries (implicit AND): **nDCG@10 = 0.007, Recall@100 = 0.007**
-  (`bench/results/relevance.json`, via frozen `tools/eval_beir.py`).
-  Cause: verbose natural-language queries over-constrain conjunction —
-  one missing term voids the whole query (mostly 0-hit results).
-- OR-variant (eval-time rewrite joining terms with OR, engine unchanged,
-  clearly labeled follow-up in `tools/eval_beir_or.py`):
-  **nDCG@10 = 0.514, Recall@100 = 0.701** (67/300 queries still empty —
-  query terms absent from corpus vocabulary).
-- Published BM25 baseline: could not be fetched from a citable source
-  (BEIR leaderboard deprecated Jan 2023, numbers behind Google Sheets), so
-  no baseline comparison is quoted. Our numbers stand alone, labeled.
+- v0.1.0 (implicit AND): **nDCG@10 = 0.007, Recall@100 = 0.007**
+  (`bench/results/before/relevance.json`, frozen `tools/eval_beir.py`).
+- v0.2.0 (free-text default OR, `minimum_should_match = 1`):
+  **nDCG@10 = 0.480, Recall@100 = 0.654**
+  (`bench/results/after/relevance.json`, same frozen script).
+- Published baseline, fetched and cited: BM25 **0.620** nDCG@10 on SciFact
+  (Thakur et al., “BEIR: A Heterogeneous Benchmark for Zero-shot
+  Evaluation of Information Retrieval Models”, arXiv:2104.08663v2,
+  Table 2: “All scores denote nDCG@10”). Remaining gap: different
+  analysis/tokenization, 67/300 queries still empty (query terms absent
+  from corpus vocabulary), no reranking. The old eval-time OR-variant
+  (0.514, `tools/eval_beir_or.py`) is superseded and kept only for history.
 
-Takeaway: the BM25 ranking itself is competitive once candidate generation
-is disjunctive; the engine needs SHOULD/minimum-should-match semantics for
-verbose queries (roadmap).
+Charts: `docs/latency.svg`, `docs/comparison.svg`, `docs/throughput.svg`
+(refreshed), `docs/latency_before_after.svg` (log scale) — hand-written SVG
+via `tools/charts_before_after.py`; frozen `tools/charts.py` untouched.
