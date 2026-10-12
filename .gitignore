@@ -6,7 +6,7 @@ data/
 target/
 bench/tantivy-bench/target/
 bench/corpus.ndjson
-bench/results/se_data/
+**/se_data/
 bench/beir/
 bench/synth_rel/
 *.dat

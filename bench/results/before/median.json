@@ -1,0 +1,334 @@
+{
+ "runs": 3,
+ "index_s": 183.42,
+ "docs_per_s": 545.0,
+ "merge_rounds": 99,
+ "merge_s": 184.1,
+ "latency_multi": {
+  "history": {
+   "hits": 10,
+   "p50_us": 116298,
+   "p95_us": 134518,
+   "p99_us": 134518
+  },
+  "city river": {
+   "hits": 10,
+   "p50_us": 153778,
+   "p95_us": 174077,
+   "p99_us": 174077
+  },
+  "king AND queen": {
+   "hits": 10,
+   "p50_us": 152555,
+   "p95_us": 183695,
+   "p99_us": 183695
+  },
+  "king OR queen": {
+   "hits": 10,
+   "p50_us": 150551,
+   "p95_us": 176441,
+   "p99_us": 176441
+  },
+  "\"united states\"": {
+   "hits": 10,
+   "p50_us": 1023954,
+   "p95_us": 1167421,
+   "p99_us": 1167421
+  },
+  "\"world war\"": {
+   "hits": 10,
+   "p50_us": 994616,
+   "p95_us": 1137074,
+   "p99_us": 1137074
+  },
+  "hist*": {
+   "hits": 10,
+   "p50_us": 957696,
+   "p95_us": 1029702,
+   "p99_us": 1029702
+  },
+  "histroy~1": {
+   "hits": 4,
+   "p50_us": 1538560,
+   "p95_us": 1630555,
+   "p99_us": 1630555
+  },
+  "title:history": {
+   "hits": 10,
+   "p50_us": 57629,
+   "p95_us": 65669,
+   "p99_us": 65669
+  },
+  "(king OR queen) AND england": {
+   "hits": 10,
+   "p50_us": 185664,
+   "p95_us": 209876,
+   "p99_us": 209876
+  },
+  "NOT war": {
+   "hits": 10,
+   "p50_us": 120736,
+   "p95_us": 144440,
+   "p99_us": 144440
+  },
+  "england": {
+   "hits": 10,
+   "p50_us": 114634,
+   "p95_us": 129646,
+   "p99_us": 129646
+  }
+ },
+ "latency_single": {
+  "history": {
+   "hits": 10,
+   "p50_us": 99873,
+   "p95_us": 105307,
+   "p99_us": 105307
+  },
+  "city river": {
+   "hits": 10,
+   "p50_us": 138673,
+   "p95_us": 155852,
+   "p99_us": 155852
+  },
+  "king AND queen": {
+   "hits": 10,
+   "p50_us": 138063,
+   "p95_us": 159734,
+   "p99_us": 159734
+  },
+  "king OR queen": {
+   "hits": 10,
+   "p50_us": 137300,
+   "p95_us": 150039,
+   "p99_us": 150039
+  },
+  "\"united states\"": {
+   "hits": 10,
+   "p50_us": 3786317,
+   "p95_us": 3962910,
+   "p99_us": 3962910
+  },
+  "\"world war\"": {
+   "hits": 10,
+   "p50_us": 3769655,
+   "p95_us": 3879921,
+   "p99_us": 3879921
+  },
+  "hist*": {
+   "hits": 10,
+   "p50_us": 882106,
+   "p95_us": 951799,
+   "p99_us": 951799
+  },
+  "histroy~1": {
+   "hits": 4,
+   "p50_us": 1336484,
+   "p95_us": 1472417,
+   "p99_us": 1472417
+  },
+  "title:history": {
+   "hits": 10,
+   "p50_us": 57371,
+   "p95_us": 70220,
+   "p99_us": 70220
+  },
+  "(king OR queen) AND england": {
+   "hits": 10,
+   "p50_us": 178175,
+   "p95_us": 191134,
+   "p99_us": 191134
+  },
+  "NOT war": {
+   "hits": 10,
+   "p50_us": 114607,
+   "p95_us": 129754,
+   "p99_us": 129754
+  },
+  "england": {
+   "hits": 10,
+   "p50_us": 98193,
+   "p95_us": 104997,
+   "p99_us": 104997
+  }
+ },
+ "latency_merged_mt": {
+  "history": {
+   "hits": 10,
+   "p50_us": 106100,
+   "p95_us": 111153,
+   "p99_us": 111153
+  },
+  "city river": {
+   "hits": 10,
+   "p50_us": 149744,
+   "p95_us": 173040,
+   "p99_us": 173040
+  },
+  "king AND queen": {
+   "hits": 10,
+   "p50_us": 141384,
+   "p95_us": 147171,
+   "p99_us": 147171
+  },
+  "king OR queen": {
+   "hits": 10,
+   "p50_us": 145839,
+   "p95_us": 158895,
+   "p99_us": 158895
+  },
+  "\"united states\"": {
+   "hits": 10,
+   "p50_us": 1267980,
+   "p95_us": 1336814,
+   "p99_us": 1336814
+  },
+  "\"world war\"": {
+   "hits": 10,
+   "p50_us": 200091,
+   "p95_us": 223362,
+   "p99_us": 223362
+  },
+  "hist*": {
+   "hits": 10,
+   "p50_us": 291521,
+   "p95_us": 352790,
+   "p99_us": 352790
+  },
+  "histroy~1": {
+   "hits": 4,
+   "p50_us": 428748,
+   "p95_us": 486843,
+   "p99_us": 486843
+  },
+  "title:history": {
+   "hits": 10,
+   "p50_us": 62589,
+   "p95_us": 72728,
+   "p99_us": 72728
+  },
+  "(king OR queen) AND england": {
+   "hits": 10,
+   "p50_us": 191501,
+   "p95_us": 207477,
+   "p99_us": 207477
+  },
+  "NOT war": {
+   "hits": 10,
+   "p50_us": 122740,
+   "p95_us": 132369,
+   "p99_us": 132369
+  },
+  "england": {
+   "hits": 10,
+   "p50_us": 105380,
+   "p95_us": 111111,
+   "p99_us": 111111
+  }
+ },
+ "latency_merged_st": {
+  "history": {
+   "hits": 10,
+   "p50_us": 107498,
+   "p95_us": 133510,
+   "p99_us": 133510
+  },
+  "city river": {
+   "hits": 10,
+   "p50_us": 151488,
+   "p95_us": 160478,
+   "p99_us": 160478
+  },
+  "king AND queen": {
+   "hits": 10,
+   "p50_us": 142690,
+   "p95_us": 171613,
+   "p99_us": 171613
+  },
+  "king OR queen": {
+   "hits": 10,
+   "p50_us": 145603,
+   "p95_us": 152984,
+   "p99_us": 152984
+  },
+  "\"united states\"": {
+   "hits": 10,
+   "p50_us": 1277381,
+   "p95_us": 1401095,
+   "p99_us": 1401095
+  },
+  "\"world war\"": {
+   "hits": 10,
+   "p50_us": 204158,
+   "p95_us": 223997,
+   "p99_us": 223997
+  },
+  "hist*": {
+   "hits": 10,
+   "p50_us": 295262,
+   "p95_us": 329255,
+   "p99_us": 329255
+  },
+  "histroy~1": {
+   "hits": 4,
+   "p50_us": 425914,
+   "p95_us": 487305,
+   "p99_us": 487305
+  },
+  "title:history": {
+   "hits": 10,
+   "p50_us": 61092,
+   "p95_us": 68422,
+   "p99_us": 68422
+  },
+  "(king OR queen) AND england": {
+   "hits": 10,
+   "p50_us": 189197,
+   "p95_us": 203085,
+   "p99_us": 203085
+  },
+  "NOT war": {
+   "hits": 10,
+   "p50_us": 122068,
+   "p95_us": 141223,
+   "p99_us": 141223
+  },
+  "england": {
+   "hits": 10,
+   "p50_us": 106063,
+   "p95_us": 114053,
+   "p99_us": 114053
+  }
+ },
+ "sqlite_index_s": 11.413630962371826,
+ "sqlite_bytes": 249135104,
+ "sqlite_queries": {
+  "history": 275.8502960205078,
+  "city river": 196.4569091796875,
+  "king AND queen": 128.9844512939453,
+  "king OR queen": 112.77198791503906,
+  "\"united states\"": 165.2240753173828,
+  "\"world war\"": 149.01161193847656,
+  "hist*": 1844.4061279296875,
+  "histroy~1": 48.39897155761719,
+  "title:history": 96.55952453613281,
+  "(king OR queen) AND england": 170.9461212158203,
+  "NOT war": 49.114227294921875,
+  "england": 51.021575927734375
+ },
+ "tantivy_index_s": 3.4,
+ "tantivy_queries": {
+  "history": 168,
+  "city river": 302,
+  "king AND queen": 198,
+  "king OR queen": 147,
+  "\"united states\"": 2714,
+  "\"world war\"": 637,
+  "hist*": 23,
+  "histroy~1": 12,
+  "title:history": 8,
+  "(king OR queen) AND england": 358,
+  "NOT war": 0,
+  "england": 133
+ }
+}
