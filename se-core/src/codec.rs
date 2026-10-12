@@ -131,7 +131,7 @@ pub fn build_skips(postings: &[Posting], encoded: &[u8], every: usize) -> Vec<Sk
     let mut pos = 0usize;
     let mut prev_doc = 0u32;
     for (i, p) in postings.iter().enumerate() {
-        if i % every == 0 {
+        if i.is_multiple_of(every) {
             skips.push(SkipEntry {
                 index: i,
                 byte_offset: pos,
@@ -151,6 +151,46 @@ pub fn build_skips(postings: &[Posting], encoded: &[u8], every: usize) -> Vec<Sk
         }
         prev_doc = p.doc;
         pos += tmp.len();
+    }
+    skips
+}
+
+/// Build skip entries by walking already-encoded bytes: decodes only varint
+/// boundaries (no postings materialized, no re-encoding). Used by
+/// rebuild_aux so flush/merge never pay for a second encode pass.
+pub fn build_skips_from_encoded(encoded: &[u8], every: usize) -> Vec<SkipEntry> {
+    let mut skips = Vec::new();
+    let mut pos = 0usize;
+    let mut doc = 0u32;
+    let mut i = 0usize;
+    while pos < encoded.len() {
+        let entry_off = pos;
+        let gap = match decode_varint(encoded, &mut pos) {
+            Some(g) => g,
+            None => break,
+        };
+        doc += gap;
+        if i.is_multiple_of(every) {
+            skips.push(SkipEntry {
+                index: i,
+                byte_offset: entry_off,
+                doc,
+            });
+        }
+        i += 1;
+        // skip freq + npos, then npos position gaps (decode-and-discard)
+        let (_freq, npos) = match (
+            decode_varint(encoded, &mut pos),
+            decode_varint(encoded, &mut pos),
+        ) {
+            (Some(f), Some(n)) => (f, n as usize),
+            _ => break,
+        };
+        for _ in 0..npos {
+            if decode_varint(encoded, &mut pos).is_none() {
+                break;
+            }
+        }
     }
     skips
 }
@@ -273,6 +313,32 @@ mod tests {
         assert_eq!(suffix[0].doc, skips[1].doc - ids[skips[1].index - 1]);
         let ids: Vec<u32> = ps.iter().map(|p| p.doc).collect();
         assert_eq!(skip_to(&ids, &skips, 9, 0), 9);
+    }
+
+    #[test]
+    fn skips_from_encoded_match() {
+        // skip tables walked from bytes must equal the re-encoded ones
+        let mut rng_like = 1u32;
+        for len in [0, 1, 7, 8, 9, 20, 100] {
+            let mut ps = Vec::new();
+            for _ in 0..len {
+                rng_like = rng_like.wrapping_mul(1664525).wrapping_add(1013904223);
+                let doc = rng_like % 1000;
+                ps.push(Posting {
+                    doc,
+                    freq: 1 + rng_like % 5,
+                    positions: vec![0, 1 + rng_like % 50],
+                });
+            }
+            ps.sort_by_key(|p| p.doc);
+            ps.dedup_by_key(|p| p.doc);
+            let enc = encode_postings(&ps);
+            assert_eq!(
+                build_skips_from_encoded(&enc, 8),
+                build_skips(&ps, &enc, 8),
+                "len={len}"
+            );
+        }
     }
 
     #[test]

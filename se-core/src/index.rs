@@ -2,7 +2,7 @@
 //! deletes/updates, tiered merge policy with background merging, and
 //! snapshot readers for consistent concurrent search.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -65,7 +65,9 @@ impl Index {
         fs::create_dir_all(dir.join("segments"))?;
         let (segments, next_id, next_seg, wal_applied) = load_manifest(dir)?;
         // recovery hygiene: segment files not referenced by the manifest are
-        // leftovers of crashed merges and are safe to delete.
+        // leftovers of crashed merges and are safe to delete; same for a
+        // staged WAL tail from a crashed checkpoint.
+        let _ = fs::remove_file(dir.join("wal.log.tmp"));
         if let Ok(live_ids) = live_segment_ids(&segments) {
             if let Ok(entries) = fs::read_dir(dir.join("segments")) {
                 for e in entries.flatten() {
@@ -252,20 +254,22 @@ impl Index {
     /// Flush the write buffer into a new immutable segment.
     pub fn flush(&self) -> std::io::Result<()> {
         let _commit = self.commit.lock().unwrap();
+        let empty = self.inner.read().unwrap().buffer.is_empty();
+        if empty {
+            // no new segment, but deletes may have checkpointed enough to
+            // drop the log prefix (tail-preserving, always safe)
+            self.checkpoint_wal()?;
+            return Ok(());
+        }
         let (docs, schema) = {
             let inner = self.inner.read().unwrap();
-            if inner.buffer.is_empty() {
-                return Ok(());
-            }
             (inner.buffer.clone(), inner.schema.clone())
         };
         self.fail_here(FailAt::FlushWrite)?;
         let seg_id = self.inner.read().unwrap().next_seg;
-        let mut w = SegmentWriter::default();
-        for (gid, fields) in &docs {
-            w.add_doc(*gid, fields, &schema);
-        }
-        let seg = w.finish(seg_id);
+        // analysis is embarrassingly parallel: build one SegmentWriter per
+        // chunk on a few threads, then combine with local-id offsets.
+        let seg = build_segment_parallel(&docs, &schema, seg_id);
         let bytes = seg.encode();
         let path = self.dir.join("segments").join(format!("seg_{seg_id}.dat"));
         {
@@ -286,6 +290,69 @@ impl Index {
             inner.wal_applied = wal_len;
         }
         self.write_manifest()?;
+        // Drop the checkpointed log prefix (tail-preserving, always safe).
+        self.checkpoint_wal()?;
+        Ok(())
+    }
+
+    /// Drop the WAL prefix already covered by the manifest checkpoint,
+    /// keeping any uncheckpointed tail. Truncation is vetoed while any
+    /// tombstoned doc is still stored in a segment: its DEL record is the
+    /// only durable copy, and dropping it would resurrect the doc.
+    /// Protocol (holds the write lock throughout so no add can interleave):
+    ///  1. stage tail bytes [wal_applied, len) into wal.log.tmp + fsync;
+    ///  2. set wal_applied = 0 and rewrite the manifest;
+    ///  3. rename tmp over wal.log and reopen the append handle.
+    ///
+    /// Crash before (2): old log + old offset replay fully (idempotent).
+    /// Crash between (2) and (3): offset 0 over the old log replays flushed
+    /// records idempotently plus the tail. Crash after (3): tail replays.
+    /// Nothing uncheckpointed is ever lost.
+    fn checkpoint_wal(&self) -> std::io::Result<()> {
+        let path = self.dir.join("wal.log");
+        let tmp = self.dir.join("wal.log.tmp");
+        let mut inner = self.inner.write().unwrap();
+        let applied = inner.wal_applied;
+        let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if applied == 0 || len == 0 {
+            // nothing checkpointed (or nothing logged): keep everything
+            return Ok(());
+        }
+        // veto: any stored-but-dead doc still needs its DEL record
+        let mut dead = false;
+        for s in &inner.segments {
+            if s.docs.iter().any(|g| !inner.live.contains(g)) {
+                dead = true;
+                break;
+            }
+        }
+        if dead {
+            return Ok(());
+        }
+        if len <= applied {
+            // whole file checkpointed: reset in place
+            inner.wal = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&path)?;
+            inner.wal_applied = 0;
+            drop(inner);
+            return self.write_manifest();
+        }
+        let mut tail = vec![0u8; (len - applied) as usize];
+        File::open(&path)?.read_exact(&mut tail)?;
+        {
+            let mut f = File::create(&tmp)?;
+            f.write_all(&tail)?;
+            f.sync_all()?;
+        }
+        inner.wal_applied = 0;
+        drop(inner);
+        self.write_manifest()?;
+        fs::rename(&tmp, &path)?;
+        let mut inner = self.inner.write().unwrap();
+        inner.wal = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(())
     }
 
@@ -327,20 +394,18 @@ impl Index {
         };
         ids.sort_by_key(|&(i, _)| i);
         let picked: Vec<usize> = ids.into_iter().map(|(i, _)| i).collect();
-        let (snapshot_segs, live) = {
+        let live = self.inner.read().unwrap().live.clone();
+        let segs: Vec<Arc<Segment>> = {
             let inner = self.inner.read().unwrap();
-            let segs: Vec<Segment> = picked
+            picked
                 .iter()
-                .map(|&i| (*inner.segments[i]).clone())
-                .collect();
-            (segs, inner.live.clone())
+                .map(|&i| Arc::clone(&inner.segments[i]))
+                .collect()
         };
-        let filtered: Vec<Segment> = snapshot_segs
-            .iter()
-            .map(|s| retain_live(s, &live))
-            .collect();
         let seg_id = self.inner.read().unwrap().next_seg;
-        let merged = merge_segments(seg_id, filtered);
+        // streaming merge borrows the segments and filters dead docs inline:
+        // no full input clone, peak stays near one extra output copy
+        let merged = merge_segments(seg_id, &segs, &live);
         let bytes = merged.encode();
         let path = self.dir.join("segments").join(format!("seg_{seg_id}.dat"));
         {
@@ -351,13 +416,13 @@ impl Index {
         self.fail_here(FailAt::MergeCommit)?;
         {
             let mut inner = self.inner.write().unwrap();
-            let old_ids: HashSet<u64> = snapshot_segs.iter().map(|s| s.id).collect();
+            let old_ids: HashSet<u64> = segs.iter().map(|s| s.id).collect();
             inner.segments.retain(|s| !old_ids.contains(&s.id));
             inner.segments.push(Arc::new(merged));
             inner.next_seg += 1;
         }
         self.write_manifest()?;
-        for s in &snapshot_segs {
+        for s in &segs {
             let _ = fs::remove_file(self.dir.join("segments").join(format!("seg_{}.dat", s.id)));
         }
         Ok(true)
@@ -372,14 +437,10 @@ impl Index {
         if snapshot_segs.len() < 2 {
             return Ok(false);
         }
-        // drop dead docs before merging
+        // drop dead docs inline during the streaming merge
         let live = self.inner.read().unwrap().live.clone();
-        let filtered: Vec<Segment> = snapshot_segs
-            .iter()
-            .map(|s| retain_live(s, &live))
-            .collect();
         let seg_id = self.inner.read().unwrap().next_seg;
-        let merged = merge_segments(seg_id, filtered);
+        let merged = merge_segments(seg_id, &snapshot_segs, &live);
         let bytes = merged.encode();
         let path = self.dir.join("segments").join(format!("seg_{seg_id}.dat"));
         {
@@ -543,6 +604,59 @@ fn live_segment_ids(segments: &[Arc<Segment>]) -> std::io::Result<HashSet<u64>> 
     Ok(segments.iter().map(|s| s.id).collect())
 }
 
+/// Build a segment from buffered docs using up to 4 threads: each chunk
+/// gets an independent SegmentWriter (analysis + map inserts), then chunks
+/// are concatenated with local-id offsets. Order is preserved, so output
+/// is identical to the single-threaded build.
+fn build_segment_parallel(
+    docs: &[(u32, BTreeMap<String, String>)],
+    schema: &Schema,
+    seg_id: u64,
+) -> Segment {
+    let nthreads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(1, 4)
+        .min(docs.len().max(1));
+    if nthreads <= 1 {
+        let mut w = SegmentWriter::default();
+        for (gid, fields) in docs {
+            w.add_doc(*gid, fields, schema);
+        }
+        return w.finish(seg_id);
+    }
+    let chunk = docs.len().div_ceil(nthreads);
+    let mut parts: Vec<SegmentWriter> = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for slice in docs.chunks(chunk) {
+            handles.push(scope.spawn(move || {
+                let mut w = SegmentWriter::default();
+                for (gid, fields) in slice {
+                    w.add_doc(*gid, fields, schema);
+                }
+                w
+            }));
+        }
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let mut w = SegmentWriter::default();
+    let mut off = 0u32;
+    for p in parts.drain(..) {
+        let base = off;
+        off += p.docs.len() as u32;
+        w.docs.extend(p.docs.iter());
+        w.stored.extend(p.stored);
+        w.field_lens.extend(p.field_lens);
+        for ((f, t), m) in p.inv {
+            let e = w.inv.entry((f, t)).or_default();
+            for (l, (fr, po)) in m {
+                e.insert(l + base, (fr, po));
+            }
+        }
+    }
+    w.finish(seg_id)
+}
+
 fn load_manifest(dir: &Path) -> std::io::Result<(Vec<Arc<Segment>>, u32, u64, u64)> {
     let path = dir.join("MANIFEST");
     if !path.exists() {
@@ -567,52 +681,6 @@ fn load_manifest(dir: &Path) -> std::io::Result<(Vec<Arc<Segment>>, u32, u64, u6
         }
     }
     Ok((segs, next_id, next_seg, wal_applied))
-}
-
-/// Strip dead (tombstoned) docs out of a segment copy.
-fn retain_live(seg: &Segment, live: &HashSet<u32>) -> Segment {
-    let keep: Vec<usize> = seg
-        .docs
-        .iter()
-        .enumerate()
-        .filter(|(_, g)| live.contains(g))
-        .map(|(i, _)| i)
-        .collect();
-    let remap: HashMap<u32, u32> = keep
-        .iter()
-        .enumerate()
-        .map(|(new, &old)| (old as u32, new as u32))
-        .collect();
-    let mut out = Segment {
-        id: seg.id,
-        docs: keep.iter().map(|&i| seg.docs[i]).collect(),
-        postings: BTreeMap::new(),
-        compressed: BTreeMap::new(),
-        skips: BTreeMap::new(),
-        field_lens: keep.iter().map(|&i| seg.field_lens[i].clone()).collect(),
-        stored: keep.iter().map(|&i| seg.stored[i].clone()).collect(),
-        dict: Default::default(),
-        field_totals: BTreeMap::new(),
-        len_buckets: BTreeMap::new(),
-    };
-    for (k, plist) in &seg.postings {
-        let mut np = Vec::new();
-        for p in plist {
-            if let Some(&nl) = remap.get(&p.doc) {
-                let mut q = p.clone();
-                q.doc = nl;
-                np.push(q);
-            }
-        }
-        if !np.is_empty() {
-            out.compressed
-                .insert(k.clone(), codec::encode_postings(&np));
-            out.postings.insert(k.clone(), np);
-        }
-    }
-    out.field_totals = crate::segment::compute_field_totals(&out.field_lens);
-    out.rebuild_aux();
-    out
 }
 
 #[cfg(test)]
@@ -651,6 +719,64 @@ mod tests {
         let hits = idx.search("search", &SearchOptions::top(10)).unwrap();
         assert_eq!(hits.len(), 2);
         let _ = hits;
+    }
+
+    #[test]
+    fn wal_truncation_keeps_recovery() {
+        let dir = tmpdir("waltrunc");
+        {
+            let idx = Index::open(&dir).unwrap();
+            idx.add(sample()).unwrap();
+            idx.add(sample()).unwrap();
+            idx.flush().unwrap();
+            // checkpointed: log truncated, offset reset
+            assert_eq!(fs::metadata(dir.join("wal.log")).unwrap().len(), 0);
+            // post-flush writes land in the fresh log and must survive a drop
+            idx.add(sample()).unwrap();
+            assert!(fs::metadata(dir.join("wal.log")).unwrap().len() > 0);
+        }
+        let idx = Index::open(&dir).unwrap();
+        assert_eq!(idx.stats().live_docs, 3);
+        let hits = idx.search("search", &SearchOptions::top(10)).unwrap();
+        assert_eq!(hits.len(), 3);
+        idx.flush().unwrap();
+        assert_eq!(fs::metadata(dir.join("wal.log")).unwrap().len(), 0);
+        assert_eq!(
+            idx.search("search", &SearchOptions::top(10)).unwrap().len(),
+            3
+        );
+    }
+
+    #[test]
+    fn wal_truncation_with_deletes_recovers() {
+        let dir = tmpdir("waltruncdel");
+        {
+            let idx = Index::open(&dir).unwrap();
+            let id = idx.add(sample()).unwrap();
+            idx.flush().unwrap();
+            assert!(idx.delete(id).unwrap());
+            idx.flush().unwrap();
+            // vetoed: the DEL is the only durable copy while the dead doc
+            // is still stored — the log must keep it
+            assert_eq!(fs::metadata(dir.join("wal.log")).unwrap().len(), 3);
+        }
+        let idx = Index::open(&dir).unwrap();
+        assert_eq!(idx.stats().live_docs, 0);
+        assert_eq!(
+            idx.search("search", &SearchOptions::top(10)).unwrap().len(),
+            0
+        );
+        // once a merge physically drops the dead doc, truncation resumes
+        idx.add(sample()).unwrap();
+        idx.flush().unwrap();
+        while idx.stats().segments > 1 {
+            assert!(idx.merge_tier().unwrap());
+        }
+        idx.flush().unwrap();
+        assert_eq!(fs::metadata(dir.join("wal.log")).unwrap().len(), 0);
+        drop(idx);
+        let idx = Index::open(&dir).unwrap();
+        assert_eq!(idx.stats().live_docs, 1);
     }
 
     #[test]

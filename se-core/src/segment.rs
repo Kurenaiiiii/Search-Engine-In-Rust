@@ -2,7 +2,8 @@
 //! compressed) term dictionary, compressed postings with skip pointers,
 //! term positions, and a stored-fields document store.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::analysis::Schema;
 use crate::codec::{self, Posting, SkipEntry};
@@ -399,10 +400,21 @@ impl Segment {
         let keys: Vec<String> = self.postings.keys().map(|(f, t)| dict_key(f, t)).collect();
         self.dict = TermDict::build(keys);
         self.skips.clear();
-        for (k, plist) in &self.postings {
-            let enc = self.compressed.get(k).cloned().unwrap_or_default();
-            self.skips
-                .insert(k.clone(), codec::build_skips(plist, &enc, SKIP_EVERY));
+        for k in self.postings.keys().cloned().collect::<Vec<_>>() {
+            // skip offsets walked straight from the encoded bytes: no second
+            // encode pass, no temporary postings (falls back to the decoded
+            // lists only when no encoding is stored yet)
+            let skips = match self.compressed.get(&k) {
+                Some(enc) if !enc.is_empty() => codec::build_skips_from_encoded(enc, SKIP_EVERY),
+                _ => match self.postings.get(&k) {
+                    Some(plist) => {
+                        let enc = codec::encode_postings(plist);
+                        codec::build_skips(plist, &enc, SKIP_EVERY)
+                    }
+                    None => Vec::new(),
+                },
+            };
+            self.skips.insert(k, skips);
         }
         let mut buckets: BTreeMap<(String, usize), Vec<String>> = BTreeMap::new();
         for (f, t) in self.postings.keys() {
@@ -485,15 +497,19 @@ impl SegmentWriter {
     }
 }
 
-/// Merge segments into one. Sort-based (not nested maps): union the doc
-/// lists, remap local ids, then gather each term's postings across segments
-/// and sort by new local id. Peak memory stays near one extra copy.
-pub fn merge_segments(id: u64, mut segs: Vec<Segment>) -> Segment {
-    // union of docs, sorted by global id for good delta compression
+/// Merge segments into one, streaming with capped memory: inputs are only
+/// borrowed (never cloned wholesale), dead docs are filtered inline during
+/// the gather, and each term's postings are gathered, sorted and encoded
+/// one term at a time across a few threads. Peak stays near a single extra
+/// copy of the merged output.
+pub fn merge_segments(id: u64, segs: &[Arc<Segment>], live: &HashSet<u32>) -> Segment {
+    // union of live docs, sorted by global id for good delta compression
     let mut order: Vec<(u32, usize, usize)> = Vec::new(); // (gid, seg, local)
     for (si, s) in segs.iter().enumerate() {
         for (li, gid) in s.docs.iter().enumerate() {
-            order.push((*gid, si, li));
+            if live.contains(gid) {
+                order.push((*gid, si, li));
+            }
         }
     }
     order.sort_by_key(|&(g, _, _)| g);
@@ -501,27 +517,17 @@ pub fn merge_segments(id: u64, mut segs: Vec<Segment>) -> Segment {
     let mut docs = Vec::with_capacity(order.len());
     let mut stored = Vec::with_capacity(order.len());
     let mut field_lens = Vec::with_capacity(order.len());
-    // move stored/lens out of the inputs to avoid a full extra copy
-    let mut taken_stored: Vec<Vec<BTreeMap<String, String>>> = segs
-        .iter_mut()
-        .map(|s| std::mem::take(&mut s.stored))
-        .collect();
-    let mut taken_lens: Vec<Vec<FieldLens>> = segs
-        .iter_mut()
-        .map(|s| std::mem::take(&mut s.field_lens))
-        .collect();
     for (nl, (gid, si, li)) in order.iter().enumerate() {
         new_local.insert(*gid, nl as u32);
         docs.push(*gid);
-        stored.push(std::mem::take(&mut taken_stored[*si][*li]));
-        field_lens.push(std::mem::take(&mut taken_lens[*si][*li]));
+        stored.push(segs[*si].stored[*li].clone());
+        field_lens.push(segs[*si].field_lens[*li].clone());
     }
     // distinct term keys (cloned once; vocab-sized, not postings-sized)
     let mut keys: Vec<(String, String)> = Vec::new();
     {
-        use std::collections::HashSet;
         let mut seen = HashSet::new();
-        for s in &segs {
+        for s in segs {
             for k in s.postings.keys() {
                 if seen.insert(k) {
                     keys.push(k.clone());
@@ -530,35 +536,47 @@ pub fn merge_segments(id: u64, mut segs: Vec<Segment>) -> Segment {
         }
     }
     keys.sort();
+    // parallel gather: disjoint key slices per thread, each emitting
+    // (key, postings, encoding); the main thread only inserts.
+    let nthreads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(1, 4)
+        .min(keys.len().max(1));
     let mut postings: BTreeMap<(String, String), Vec<Posting>> = BTreeMap::new();
-    let mut compressed = BTreeMap::new();
-    let mut gather: Vec<(u32, u32, Vec<u32>)> = Vec::new(); // (new_local, freq, positions)
-    for key in keys {
-        gather.clear();
-        for s in &segs {
-            if let Some(plist) = s.postings.get(&key) {
-                for p in plist {
-                    let gid = s.docs[p.doc as usize];
-                    if let Some(&nl) = new_local.get(&gid) {
-                        gather.push((nl, p.freq, p.positions.clone()));
-                    }
-                }
+    let mut compressed: BTreeMap<(String, String), Vec<u8>> = BTreeMap::new();
+    if nthreads <= 1 {
+        let mut gather: Vec<(u32, u32, Vec<u32>)> = Vec::new();
+        for key in &keys {
+            if let Some((plist, enc)) = gather_term(segs, &new_local, key, &mut gather) {
+                compressed.insert(key.clone(), enc);
+                postings.insert(key.clone(), plist);
             }
         }
-        if gather.is_empty() {
-            continue;
-        }
-        gather.sort_by_key(|&(nl, _, _)| nl);
-        let plist: Vec<Posting> = gather
-            .drain(..)
-            .map(|(doc, freq, positions)| Posting {
-                doc,
-                freq,
-                positions,
-            })
-            .collect();
-        compressed.insert(key.clone(), codec::encode_postings(&plist));
-        postings.insert(key, plist);
+    } else {
+        let chunk = keys.len().div_ceil(nthreads);
+        let nl = &new_local;
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for slice in keys.chunks(chunk) {
+                handles.push(scope.spawn(move || {
+                    let mut out = Vec::with_capacity(slice.len());
+                    let mut gather: Vec<(u32, u32, Vec<u32>)> = Vec::new();
+                    for key in slice {
+                        if let Some((plist, enc)) = gather_term(segs, nl, key, &mut gather) {
+                            out.push((key.clone(), plist, enc));
+                        }
+                    }
+                    out
+                }));
+            }
+            for h in handles {
+                for (key, plist, enc) in h.join().unwrap() {
+                    compressed.insert(key.clone(), enc);
+                    postings.insert(key, plist);
+                }
+            }
+        });
     }
     let field_totals = compute_field_totals(&field_lens);
     let mut seg = Segment {
@@ -575,6 +593,41 @@ pub fn merge_segments(id: u64, mut segs: Vec<Segment>) -> Segment {
     };
     seg.rebuild_aux();
     seg
+}
+
+/// Gather one term's live postings across segments into a sorted, encoded
+/// list. Reuses the caller's scratch buffer; returns None when empty.
+fn gather_term(
+    segs: &[Arc<Segment>],
+    new_local: &HashMap<u32, u32>,
+    key: &(String, String),
+    gather: &mut Vec<(u32, u32, Vec<u32>)>,
+) -> Option<(Vec<Posting>, Vec<u8>)> {
+    gather.clear();
+    for s in segs {
+        if let Some(plist) = s.postings.get(key) {
+            for p in plist {
+                let gid = s.docs[p.doc as usize];
+                if let Some(&nl) = new_local.get(&gid) {
+                    gather.push((nl, p.freq, p.positions.clone()));
+                }
+            }
+        }
+    }
+    if gather.is_empty() {
+        return None;
+    }
+    gather.sort_by_key(|&(nl, _, _)| nl);
+    let plist: Vec<Posting> = gather
+        .drain(..)
+        .map(|(doc, freq, positions)| Posting {
+            doc,
+            freq,
+            positions,
+        })
+        .collect();
+    let enc = codec::encode_postings(&plist);
+    Some((plist, enc))
 }
 
 #[cfg(test)]
@@ -640,14 +693,37 @@ mod tests {
 
     #[test]
     fn merge_union() {
+        use std::collections::HashSet;
+        use std::sync::Arc;
         let schema = Schema::default();
         let mut w1 = SegmentWriter::default();
         w1.add_doc(0, &doc("a", "alpha beta"), &schema);
         let mut w2 = SegmentWriter::default();
         w2.add_doc(1, &doc("b", "beta gamma"), &schema);
-        let m = merge_segments(3, vec![w1.finish(1), w2.finish(2)]);
+        let segs = vec![Arc::new(w1.finish(1)), Arc::new(w2.finish(2))];
+        let live: HashSet<u32> = [0, 1].into_iter().collect();
+        let m = merge_segments(3, &segs, &live);
         assert_eq!(m.doc_count(), 2);
         assert_eq!(m.df("body", "beta"), 2);
         assert_eq!(m.df("body", "alpha"), 1);
+    }
+
+    #[test]
+    fn merge_drops_tombstoned_docs() {
+        use std::collections::HashSet;
+        use std::sync::Arc;
+        let schema = Schema::default();
+        let mut w1 = SegmentWriter::default();
+        w1.add_doc(0, &doc("a", "alpha beta"), &schema);
+        let mut w2 = SegmentWriter::default();
+        w2.add_doc(1, &doc("b", "beta gamma"), &schema);
+        let segs = vec![Arc::new(w1.finish(1)), Arc::new(w2.finish(2))];
+        // doc 1 deleted: streaming merge must drop it inline
+        let live: HashSet<u32> = [0].into_iter().collect();
+        let m = merge_segments(3, &segs, &live);
+        assert_eq!(m.doc_count(), 1);
+        assert_eq!(m.df("body", "beta"), 1);
+        assert_eq!(m.df("body", "gamma"), 0);
+        assert_eq!(m.stored[0].get("title").map(String::as_str), Some("a"));
     }
 }
