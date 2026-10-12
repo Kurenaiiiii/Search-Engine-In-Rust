@@ -10,6 +10,7 @@ fn usage() -> ! {
         "usage:
   se-cli --dir <data> index <file.ndjson>     index documents (one JSON object per line)
   se-cli --dir <data> search <query> [--top-k N] [--scorer bm25|tfidf] [--json]
+                   [--minimum-should-match N]
   se-cli --dir <data> stats
   se-cli --dir <data> optimize                  merge all segments into one
   se-cli --dir <data> suggest <prefix> [--field body]
@@ -52,6 +53,7 @@ fn main() {
             let mut top_k = 10usize;
             let mut scorer = Scorer::Bm25 { k1: 1.2, b: 0.75 };
             let mut json = false;
+            let mut msm = 1usize;
             let mut j = 2;
             while j < rest.len() {
                 match rest[j].as_str() {
@@ -65,6 +67,10 @@ fn main() {
                         }
                         j += 2;
                     }
+                    "--minimum-should-match" => {
+                        msm = rest.get(j + 1).and_then(|v| v.parse().ok()).unwrap_or(1);
+                        j += 2;
+                    }
                     "--json" => {
                         json = true;
                         j += 1;
@@ -72,7 +78,7 @@ fn main() {
                     _ => j += 1,
                 }
             }
-            cmd_search(&dir, q, top_k, scorer, json);
+            cmd_search(&dir, q, top_k, scorer, msm, json);
         }
         "stats" => cmd_stats(&dir),
         "optimize" => {
@@ -215,11 +221,12 @@ fn cmd_index(dir: &str, file: &str) {
     );
 }
 
-fn cmd_search(dir: &str, q: &str, top_k: usize, scorer: Scorer, json: bool) {
+fn cmd_search(dir: &str, q: &str, top_k: usize, scorer: Scorer, msm: usize, json: bool) {
     let idx = open(dir);
     let opts = SearchOptions {
         top_k,
         scorer,
+        minimum_should_match: msm.max(1),
         ..Default::default()
     };
     let t0 = std::time::Instant::now();

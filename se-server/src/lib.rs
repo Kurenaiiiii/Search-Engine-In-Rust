@@ -6,7 +6,7 @@
 //!   POST /api/docs            {"title": "..", "body": ".."} -> {"id": N}
 //!   POST /api/docs/bulk       NDJSON or JSON array -> {"added": [ids]}
 //!   GET  /api/docs/:id  DELETE /api/docs/:id  PUT /api/docs/:id
-//!   GET  /api/search?q=..&k=..&offset=..&fields=..&highlight=1&scorer=bm25
+//!   GET  /api/search?q=..&k=..&offset=..&fields=..&highlight=1&scorer=bm25&msm=1
 //!   GET  /api/suggest?prefix=..&field=body&limit=8
 //!   GET  /api/spell?term=..&field=body
 
@@ -628,6 +628,12 @@ impl Server {
                     if params.get("scorer").map(|v| v == "tfidf").unwrap_or(false) {
                         opts.scorer = Scorer::Tfidf;
                     }
+                    // minimum_should_match applies to free-text Should queries
+                    opts.minimum_should_match = params
+                        .get("msm")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(1)
+                        .max(1);
                     let t = Instant::now();
                     match self.index.search(&q, &opts) {
                         Ok(hits) => {

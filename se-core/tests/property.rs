@@ -44,7 +44,7 @@ fn random_doc(rng: &mut Rng) -> BTreeMap<String, String> {
 fn random_query(rng: &mut Rng) -> String {
     let w1 = rng.pick(VOCAB).to_string();
     let w2 = rng.pick(VOCAB).to_string();
-    match rng.below(8) {
+    match rng.below(9) {
         0 => w1,
         1 => format!("{w1} AND {w2}"),
         2 => format!("{w1} OR {w2}"),
@@ -52,6 +52,7 @@ fn random_query(rng: &mut Rng) -> String {
         4 => format!("\"{w1} {w2}\""),
         5 => format!("{}*", &w1[..w1.len().min(3)]),
         6 => format!("{w1}~1"),
+        7 => format!("{w1} {w2}"),
         _ => format!("title:{w1}"),
     }
 }
@@ -143,14 +144,29 @@ fn oracle_phrase_prefix_fuzzy() {
         "title:search",
         "(rust OR engine) AND index",
         "NOT rust",
+        // free-text default OR + minimum_should_match variants
+        "rust engine",
+        "rust search engine",
+        "rust^2 engine",
     ] {
         let q = parse(qs).unwrap();
-        let opts = SearchOptions::top(10);
-        let got = idx.search(qs, &opts).unwrap();
-        let want = brute.search(&q, &opts);
-        let gs: Vec<u32> = got.iter().map(|h| h.doc).collect();
-        let ws: Vec<u32> = want.iter().map(|h| h.doc).collect();
-        assert_eq!(gs, ws, "query '{qs}'");
+        for msm in [1, 2] {
+            let mut opts = SearchOptions::top(10);
+            opts.minimum_should_match = msm;
+            let got = idx.search(qs, &opts).unwrap();
+            let want = brute.search(&q, &opts);
+            let gs: Vec<u32> = got.iter().map(|h| h.doc).collect();
+            let ws: Vec<u32> = want.iter().map(|h| h.doc).collect();
+            assert_eq!(gs, ws, "query '{qs}' msm={msm}");
+            for (g, w) in got.iter().zip(want.iter()) {
+                let tol = 1e-3 * w.score.abs().max(1.0);
+                assert!(
+                    (g.score - w.score).abs() <= tol,
+                    "query '{qs}' msm={msm} doc {}: {g:?} vs {w:?}",
+                    g.doc
+                );
+            }
+        }
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -137,6 +137,25 @@ impl Brute {
                     None
                 }
             }
+            Query::Should(parts) => {
+                let msm = opts.minimum_should_match.max(1);
+                if msm <= 1 {
+                    return self.eval(doc, &Query::Or(parts.clone()), opts, n);
+                }
+                let mut s = 0.0;
+                let mut count = 0usize;
+                for p in parts {
+                    if let Some(v) = self.eval(doc, p, opts, n) {
+                        s += v;
+                        count += 1;
+                    }
+                }
+                if count >= msm {
+                    Some(s)
+                } else {
+                    None
+                }
+            }
             Query::Term { field, term, boost } => {
                 let mut s = 0.0;
                 let mut any = false;

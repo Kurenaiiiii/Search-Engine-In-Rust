@@ -1,5 +1,8 @@
 //! Query language: AND, OR, NOT, parentheses, "quoted phrases",
 //! field:term, prefix term*, fuzzy term~N, boost term^2.0.
+//! Plain free text (bare terms, no operators) defaults to a scored OR
+//! disjunction; anything with operators, quotes, parens or fields keeps
+//! strict boolean semantics.
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Query {
@@ -26,6 +29,10 @@ pub enum Query {
     },
     And(Vec<Query>),
     Or(Vec<Query>),
+    /// Free-text disjunction: plain terms juxtaposed with no operators.
+    /// Scores like Or (sum of matching parts); docs matching fewer than
+    /// `SearchOptions::minimum_should_match` parts are dropped.
+    Should(Vec<Query>),
     Not(Box<Query>),
     MatchAll,
 }
@@ -206,6 +213,20 @@ fn parse_atom_phrase(
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
+    /// any explicit syntax seen (AND/OR/NOT, parens, phrases, field:):
+    /// forces strict boolean semantics for the whole query
+    explicit: bool,
+}
+
+/// A free-text atom: bare term/prefix/fuzzy with no field. Juxtapositions
+/// of only these (and nothing explicit) become Should instead of And.
+fn is_free_atom(q: &Query) -> bool {
+    matches!(
+        q,
+        Query::Term { field: None, .. }
+            | Query::Prefix { field: None, .. }
+            | Query::Fuzzy { field: None, .. }
+    )
 }
 
 impl Parser {
@@ -215,18 +236,22 @@ impl Parser {
     fn or_level(&mut self) -> Result<Query, String> {
         let mut left = self.and_level()?;
         while self.peek() == Some(&Tok::Or) {
+            self.explicit = true;
             self.pos += 1;
             let right = self.and_level()?;
             left = Query::Or(vec![left, right]);
         }
         Ok(left)
     }
-    /// AND level also treats juxtaposition ("a b", "a NOT b") as AND.
+    /// AND level also treats juxtaposition ("a b", "a NOT b") as AND...
+    /// except pure free text (bare terms, nothing explicit anywhere), which
+    /// becomes a scored Should disjunction instead.
     fn and_level(&mut self) -> Result<Query, String> {
         let mut parts = vec![self.unary()?];
         loop {
             match self.peek() {
                 Some(Tok::And) => {
+                    self.explicit = true;
                     self.pos += 1;
                     parts.push(self.unary()?);
                 }
@@ -239,6 +264,8 @@ impl Parser {
         }
         Ok(if parts.len() == 1 {
             parts.pop().unwrap()
+        } else if !self.explicit && parts.iter().all(is_free_atom) {
+            Query::Should(parts)
         } else {
             Query::And(parts)
         })
@@ -246,6 +273,7 @@ impl Parser {
     fn unary(&mut self) -> Result<Query, String> {
         match self.peek() {
             Some(Tok::Not) => {
+                self.explicit = true;
                 self.pos += 1;
                 Ok(Query::Not(Box::new(self.unary()?)))
             }
@@ -255,6 +283,7 @@ impl Parser {
     fn primary(&mut self) -> Result<Query, String> {
         match self.peek().cloned() {
             Some(Tok::LParen) => {
+                self.explicit = true;
                 self.pos += 1;
                 if self.peek() == Some(&Tok::RParen) {
                     return Err("empty parentheses '()': put a query inside".to_string());
@@ -269,6 +298,7 @@ impl Parser {
                 }
             }
             Some(Tok::Phrase(s)) => {
+                self.explicit = true;
                 self.pos += 1;
                 // a Word like `title:` directly before a phrase applies as field
                 parse_atom_phrase(None, &s, "")
@@ -280,6 +310,7 @@ impl Parser {
                     if f.is_empty() || !f.chars().all(|c| c.is_alphanumeric() || c == '_') {
                         return Err(format!("invalid field name in '{w}'"));
                     }
+                    self.explicit = true;
                     self.pos += 1;
                     if let Some(Tok::Phrase(s)) = self.peek().cloned() {
                         self.pos += 1;
@@ -288,6 +319,10 @@ impl Parser {
                     unreachable!();
                 }
                 self.pos += 1;
+                let (field, _) = split_field(&w);
+                if field.is_some() {
+                    self.explicit = true;
+                }
                 parse_atom_word(&w)
             }
             Some(Tok::And) | Some(Tok::Or) => Err(
@@ -310,7 +345,11 @@ pub fn parse(input: &str) -> Result<Query, String> {
     if toks.is_empty() {
         return Ok(Query::MatchAll);
     }
-    let mut p = Parser { toks, pos: 0 };
+    let mut p = Parser {
+        toks,
+        pos: 0,
+        explicit: false,
+    };
     let q = p.or_level()?;
     if p.pos != p.toks.len() {
         return Err("unexpected trailing input: check parentheses and operators".to_string());
@@ -332,7 +371,9 @@ impl Query {
             Query::Phrase { terms, .. } => terms.clone(),
             Query::Prefix { prefix, .. } => vec![prefix.to_lowercase()],
             Query::Fuzzy { term, .. } => vec![crate::analysis::stem(&term.to_lowercase())],
-            Query::And(v) | Query::Or(v) => v.iter().flat_map(|q| q.literal_terms()).collect(),
+            Query::And(v) | Query::Or(v) | Query::Should(v) => {
+                v.iter().flat_map(|q| q.literal_terms()).collect()
+            }
             Query::Not(q) => q.literal_terms(),
             Query::MatchAll => vec![],
         }
@@ -400,8 +441,35 @@ mod tests {
         let q = parse("(a OR b) AND c").unwrap();
         assert!(matches!(q, Query::And(_)));
         // implicit AND
-        assert!(matches!(parse("a b").unwrap(), Query::And(_)));
+        assert!(matches!(parse("a b").unwrap(), Query::Should(_)));
         assert!(matches!(parse("a NOT b").unwrap(), Query::And(_)));
+        // strict again once anything explicit appears
+        assert!(matches!(parse("title:a b").unwrap(), Query::And(_)));
+        assert!(matches!(parse("\"a b\" c").unwrap(), Query::And(_)));
+        assert!(matches!(parse("(a b) c").unwrap(), Query::And(_)));
+        // decorations alone stay free text
+        assert!(matches!(parse("a^2 b").unwrap(), Query::Should(_)));
+        assert!(matches!(parse("a* b~1").unwrap(), Query::Should(_)));
+    }
+
+    #[test]
+    fn parse_should_shape() {
+        let q = parse("rust engine").unwrap();
+        assert_eq!(
+            q,
+            Query::Should(vec![
+                Query::Term {
+                    field: None,
+                    term: "rust".into(),
+                    boost: 1.0
+                },
+                Query::Term {
+                    field: None,
+                    term: "engine".into(),
+                    boost: 1.0
+                },
+            ])
+        );
     }
 
     #[test]

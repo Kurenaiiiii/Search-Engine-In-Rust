@@ -30,6 +30,9 @@ pub struct SearchOptions {
     pub default_fields: Vec<String>,
     /// max search threads across segments; 1 = single-threaded
     pub max_threads: usize,
+    /// minimum matching parts for free-text Should queries (default 1 =
+    /// plain OR). Explicit OR/AND/NOT always keep strict semantics.
+    pub minimum_should_match: usize,
 }
 
 impl Default for SearchOptions {
@@ -40,6 +43,7 @@ impl Default for SearchOptions {
             field_boosts: HashMap::new(),
             default_fields: Vec::new(),
             max_threads: 8,
+            minimum_should_match: 1,
         }
     }
 }
@@ -461,7 +465,7 @@ fn collect_keys(
             dist: *dist,
         }),
         Query::Phrase { field, terms, .. } => phrases.push((field.clone(), terms.clone())),
-        Query::And(v) | Query::Or(v) => {
+        Query::And(v) | Query::Or(v) | Query::Should(v) => {
             for p in v {
                 collect_keys(p, keys, phrases);
             }
@@ -614,6 +618,28 @@ fn eval_segment(ctx: &EvalCtx, q: &Query, top: bool) -> Vec<(u32, f32)> {
                 }
             }
             acc.into_iter().collect()
+        }
+        Query::Should(parts) => {
+            let msm = opts.minimum_should_match.max(1);
+            if msm <= 1 {
+                // plain OR: identical scores via the Or path (incl. WAND)
+                return eval_segment(ctx, &Query::Or(parts.clone()), top);
+            }
+            // docs must match at least msm parts; scores sum like Or.
+            // counts are per part (a multi-term prefix/fuzzy part counts
+            // once), matching the brute-force oracle exactly.
+            let mut acc: HashMap<u32, (f32, usize)> = HashMap::new();
+            for p in parts {
+                for (d, s) in eval_segment(ctx, p, false) {
+                    let e = acc.entry(d).or_insert((0.0, 0));
+                    e.0 += s;
+                    e.1 += 1;
+                }
+            }
+            acc.into_iter()
+                .filter(|(_, (_, c))| *c >= msm)
+                .map(|(d, (s, _))| (d, s))
+                .collect()
         }
         Query::Term { field, term, boost } => {
             let key = ExpKey {
