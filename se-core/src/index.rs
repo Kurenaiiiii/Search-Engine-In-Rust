@@ -820,6 +820,39 @@ mod tests {
     }
 
     #[test]
+    fn streaming_merge_equivalence() {
+        // tiered streaming merges (borrowed inputs, inline tombstone
+        // filtering) must preserve search results exactly
+        let dir = tmpdir("streammerge");
+        let idx = Index::open(&dir).unwrap();
+        for i in 0..6 {
+            let mut d = sample();
+            d.insert(
+                "body".into(),
+                format!("streaming merge test doc {i} engine"),
+            );
+            idx.add(d).unwrap();
+            idx.flush().unwrap();
+        }
+        idx.delete(1).unwrap();
+        idx.flush().unwrap();
+        let queries = ["search", "engine", "test doc", "\"merge test\"", "stream*"];
+        let before: Vec<Vec<Hit>> = queries
+            .iter()
+            .map(|q| idx.search(q, &SearchOptions::top(10)).unwrap())
+            .collect();
+        while idx.stats().segments > 1 {
+            assert!(idx.merge_tier().unwrap());
+        }
+        for (q, want) in queries.iter().zip(before.iter()) {
+            let got = idx.search(q, &SearchOptions::top(10)).unwrap();
+            assert_eq!(&got, want, "query '{q}' changed across streaming merges");
+        }
+        assert_eq!(idx.stats().segments, 1);
+        assert_eq!(idx.stats().live_docs, 5);
+    }
+
+    #[test]
     fn crash_at_flush_points_recovers() {
         for point in [FailAt::FlushWrite, FailAt::FlushCommit] {
             let dir = tmpdir(&format!("crash{point:?}"));
