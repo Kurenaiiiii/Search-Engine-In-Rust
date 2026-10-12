@@ -111,16 +111,20 @@ Recall@100 **0.007 → 0.654** (default-OR; no eval-time rewrite).
 Published baseline, fetched and cited: BM25 **0.620** nDCG@10 on SciFact
 (Thakur et al., “BEIR: A Heterogeneous Benchmark for Zero-shot Evaluation
 of Information Retrieval Models”, arXiv:2104.08663v2, Table 2, “All scores
-denote nDCG@10”). Remaining gap: different analysis/tokenization, 67/300
+denote nDCG@10”). It scores below the old eval-time OR rewrite (0.514)
+because the rewrite ORs every whitespace token while the parser reads
+English “or”/“and”/“not” inside claims as boolean syntax, forcing those
+queries down the strict path. Remaining gap: different
+analysis/tokenization, 67/300
 queries still empty (query terms absent from corpus vocabulary), no
 reranking.
 
-Where we still lose, plainly: term queries are now within ~2–5× of
-Tantivy (e.g. `history` 0.78 vs 0.43 ms) but SQLite is still 10–100× faster
+Where we still lose, plainly: term queries are now within ~1–5× of
+Tantivy (e.g. `king OR queen` 0.33 vs 0.32 ms; `history` 0.78 vs 0.39 ms) but SQLite is still 10–100× faster
 per query, and prefix/phrase/fuzzy gaps remain — per-query snapshot and
 stat setup, hash-based cross-segment merges, decoded-resident postings
 (1.6 GB RSS per 100k docs), two-pass phrase scoring, and edit distance over
-length buckets instead of an automaton. Correctness (47 tests incl. a
+length buckets instead of an automaton. Correctness (48 tests incl. a
 brute-force oracle) still comes first.
 
 ## Limitations

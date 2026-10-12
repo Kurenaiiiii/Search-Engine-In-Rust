@@ -84,13 +84,15 @@ disjunctions; `select_nth` top-k. Decoded-resident postings were deliberately
 kept, so block-decode + skip-pointer traversal was skipped as pointless
 here (documented in ARCHITECTURE.md).
 
-Where we still lose: term/OR queries now match Tantivy (`city river`
-0.70 vs 0.68 ms; `king OR queen` 0.33 vs 0.32 ms), while SQLite stays
+Where we still lose: term/OR queries run within ~1–5× of Tantivy
+(`city river`
+0.70 vs 0.68 ms; `king OR queen` 0.33 vs 0.32 ms; `history` 0.78 vs
+0.39 ms; `england` 0.58 vs 0.13 ms), while SQLite stays
 10–100× faster on most queries and prefix (`hist*` 1.37 vs 0.04 ms),
 fuzzy (`histroy~1` 59 ms) and `NOT`
 complement scoring (7.6 ms) remain weak spots — edit distance over buckets
 instead of an automaton, two-pass phrase scoring, hash cross-segment
-merges. All stated plainly; oracle parity held throughout (47 tests).
+merges. All stated plainly; oracle parity held throughout (48 tests).
 
 ## Relevance (BEIR SciFact, raw queries, no rewrite)
 
@@ -107,7 +109,12 @@ merges. All stated plainly; oracle parity held throughout (47 tests).
   Evaluation of Information Retrieval Models”, arXiv:2104.08663v2,
   Table 2: “All scores denote nDCG@10”). Remaining gap: different
   analysis/tokenization, 67/300 queries still empty (query terms absent
-  from corpus vocabulary), no reranking. The old eval-time OR-variant
+  from corpus vocabulary), no reranking. The raw default (0.480) scores
+  below the old eval-time OR-variant (0.514) because the rewrite ORs every
+  whitespace token while the parser reads English "or"/"and"/"not" inside
+  claims (44/20/6 of the 300 test queries) as boolean syntax, forcing those
+  queries down the strict path with different candidate sets. The old
+  eval-time OR-variant
   (0.514, `tools/eval_beir_or.py`) is superseded and kept only for history.
 
 Charts: `docs/latency.svg`, `docs/comparison.svg`, `docs/throughput.svg`

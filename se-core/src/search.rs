@@ -1397,4 +1397,102 @@ mod tests {
         assert_eq!(edit_distance("rust", "rusty", 2), 1);
         assert!(edit_distance("rust", "python", 2) > 2);
     }
+
+    #[test]
+    fn wand_or_matches_exhaustive_or() {
+        // WAND vs exhaustive scoring equivalence: 5 high-score docs come
+        // first so the top-3 threshold binds immediately and the remaining
+        // ~115 low-score docs must be pruned without changing results.
+        use std::sync::Arc;
+        let schema = Schema::default();
+        let mut w = SegmentWriter::default();
+        for i in 0..120u32 {
+            let body = if i < 5 {
+                "zelkova zelkova zelkova common filler words here".to_string()
+            } else {
+                format!("common filler words here doc number {i}")
+            };
+            w.add_doc(i, &BTreeMap::from([("body".to_string(), body)]), &schema);
+        }
+        let seg = w.finish(1);
+        let snap = Snapshot {
+            segments: vec![Arc::new(seg)],
+            live: (0..120u32).collect(),
+            stored: Arc::new(BTreeMap::new()),
+            schema: schema.clone(),
+            fields: vec!["body".to_string()],
+            total_docs: 120,
+            live_complete: true,
+        };
+        let opts = SearchOptions::top(3);
+        let Query::Or(parts) = parse("zelkova OR common").unwrap() else {
+            panic!("expected a flat Or");
+        };
+        assert_eq!(parts.len(), 2);
+        let st = QueryStats::build(&snap, &snap.schema, &opts, &Query::Or(parts.clone()));
+        let n = snap.live_count();
+        let seg = &snap.segments[0];
+        let ctx = EvalCtx {
+            seg,
+            snap: &snap,
+            schema: &snap.schema,
+            opts: &opts,
+            n,
+            st: &st,
+        };
+        let wand = maxscore_or(&ctx, &parts).expect("flat terms take the WAND path");
+        // exhaustive: score every live doc by summing the same clauses
+        let mut clauses = Vec::new();
+        for p in &parts {
+            let Query::Term { field, term, boost } = p else {
+                panic!("expected Term parts");
+            };
+            let key = ExpKey {
+                field: field.clone(),
+                kind: 0,
+                raw: term.clone(),
+                dist: 0,
+            };
+            clauses.extend(expand_clauses(&st, &snap.schema, &opts, &key, *boost, n));
+        }
+        let mut expected: Vec<(u32, f32)> = Vec::new();
+        for (li, &gid) in seg.docs.iter().enumerate() {
+            let mut s = 0.0f32;
+            let mut any = false;
+            for c in &clauses {
+                let df = st.df_of(&c.field, &c.term);
+                let avg = st.avg_of(&c.field) as f32;
+                if let Some(pl) = seg.postings_for(&c.field, &c.term) {
+                    if let Some(p) = pl.iter().find(|p| p.doc as usize == li) {
+                        let dl = snap.doc_field_len(seg, p.doc, &c.field);
+                        let Scorer::Bm25 { k1, b } = opts.scorer else {
+                            panic!("expected default BM25");
+                        };
+                        s += bm25_with_idf(p.freq as f32, dl, avg, bm25_idf(df, n), k1, b)
+                            * c.boost
+                            * opts.field_boost(&snap.schema, &c.field);
+                        any = true;
+                    }
+                }
+            }
+            if any {
+                expected.push((gid, s));
+            }
+        }
+        expected.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then_with(|| a.0.cmp(&b.0)));
+        expected.truncate(3);
+        assert_eq!(wand.len(), expected.len(), "same top-k set size");
+        assert!(
+            wand.iter()
+                .map(|(d, _)| d)
+                .eq(expected.iter().map(|(d, _)| d)),
+            "WAND top-k docs differ: {wand:?} vs {expected:?}"
+        );
+        for ((_, ws), (_, es)) in wand.iter().zip(expected.iter()) {
+            let tol = 1e-6 * es.abs().max(1.0);
+            assert!((ws - es).abs() <= tol, "WAND score differs: {ws} vs {es}");
+        }
+        // high-score docs must win
+        assert!(wand.iter().all(|(d, _)| *d < 5));
+    }
 }
