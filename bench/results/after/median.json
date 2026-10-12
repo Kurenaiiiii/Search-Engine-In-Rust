@@ -1,0 +1,334 @@
+{
+ "runs": 3,
+ "index_s": 137.68,
+ "docs_per_s": 726.0,
+ "merge_rounds": 99,
+ "merge_s": 141.6,
+ "latency_multi": {
+  "history": {
+   "hits": 10,
+   "p50_us": 2289,
+   "p95_us": 3634,
+   "p99_us": 3634
+  },
+  "city river": {
+   "hits": 10,
+   "p50_us": 2669,
+   "p95_us": 3368,
+   "p99_us": 3368
+  },
+  "king AND queen": {
+   "hits": 10,
+   "p50_us": 2609,
+   "p95_us": 3161,
+   "p99_us": 3161
+  },
+  "king OR queen": {
+   "hits": 10,
+   "p50_us": 2135,
+   "p95_us": 3468,
+   "p99_us": 3468
+  },
+  "\"united states\"": {
+   "hits": 10,
+   "p50_us": 8600,
+   "p95_us": 12393,
+   "p99_us": 12393
+  },
+  "\"world war\"": {
+   "hits": 10,
+   "p50_us": 2942,
+   "p95_us": 6799,
+   "p99_us": 6799
+  },
+  "hist*": {
+   "hits": 10,
+   "p50_us": 34338,
+   "p95_us": 52735,
+   "p99_us": 52735
+  },
+  "histroy~1": {
+   "hits": 4,
+   "p50_us": 282273,
+   "p95_us": 328750,
+   "p99_us": 328750
+  },
+  "title:history": {
+   "hits": 10,
+   "p50_us": 964,
+   "p95_us": 1371,
+   "p99_us": 1371
+  },
+  "(king OR queen) AND england": {
+   "hits": 10,
+   "p50_us": 4181,
+   "p95_us": 5490,
+   "p99_us": 5490
+  },
+  "NOT war": {
+   "hits": 10,
+   "p50_us": 11383,
+   "p95_us": 17734,
+   "p99_us": 17734
+  },
+  "england": {
+   "hits": 10,
+   "p50_us": 1786,
+   "p95_us": 2516,
+   "p99_us": 2516
+  }
+ },
+ "latency_single": {
+  "history": {
+   "hits": 10,
+   "p50_us": 1915,
+   "p95_us": 2022,
+   "p99_us": 2022
+  },
+  "city river": {
+   "hits": 10,
+   "p50_us": 3020,
+   "p95_us": 3101,
+   "p99_us": 3101
+  },
+  "king AND queen": {
+   "hits": 10,
+   "p50_us": 2129,
+   "p95_us": 2251,
+   "p99_us": 2251
+  },
+  "king OR queen": {
+   "hits": 10,
+   "p50_us": 2225,
+   "p95_us": 2314,
+   "p99_us": 2314
+  },
+  "\"united states\"": {
+   "hits": 10,
+   "p50_us": 10588,
+   "p95_us": 12778,
+   "p99_us": 12778
+  },
+  "\"world war\"": {
+   "hits": 10,
+   "p50_us": 2605,
+   "p95_us": 3403,
+   "p99_us": 3403
+  },
+  "hist*": {
+   "hits": 10,
+   "p50_us": 35640,
+   "p95_us": 36514,
+   "p99_us": 36514
+  },
+  "histroy~1": {
+   "hits": 4,
+   "p50_us": 222426,
+   "p95_us": 252849,
+   "p99_us": 252849
+  },
+  "title:history": {
+   "hits": 10,
+   "p50_us": 447,
+   "p95_us": 614,
+   "p99_us": 614
+  },
+  "(king OR queen) AND england": {
+   "hits": 10,
+   "p50_us": 4005,
+   "p95_us": 5344,
+   "p99_us": 5344
+  },
+  "NOT war": {
+   "hits": 10,
+   "p50_us": 14904,
+   "p95_us": 17070,
+   "p99_us": 17070
+  },
+  "england": {
+   "hits": 10,
+   "p50_us": 1706,
+   "p95_us": 1838,
+   "p99_us": 1838
+  }
+ },
+ "latency_merged_mt": {
+  "history": {
+   "hits": 10,
+   "p50_us": 783,
+   "p95_us": 849,
+   "p99_us": 849
+  },
+  "city river": {
+   "hits": 10,
+   "p50_us": 700,
+   "p95_us": 780,
+   "p99_us": 780
+  },
+  "king AND queen": {
+   "hits": 10,
+   "p50_us": 1013,
+   "p95_us": 1124,
+   "p99_us": 1124
+  },
+  "king OR queen": {
+   "hits": 10,
+   "p50_us": 327,
+   "p95_us": 514,
+   "p99_us": 514
+  },
+  "\"united states\"": {
+   "hits": 10,
+   "p50_us": 7990,
+   "p95_us": 9306,
+   "p99_us": 9306
+  },
+  "\"world war\"": {
+   "hits": 10,
+   "p50_us": 1468,
+   "p95_us": 1561,
+   "p99_us": 1561
+  },
+  "hist*": {
+   "hits": 10,
+   "p50_us": 1370,
+   "p95_us": 1466,
+   "p99_us": 1466
+  },
+  "histroy~1": {
+   "hits": 4,
+   "p50_us": 59136,
+   "p95_us": 64854,
+   "p99_us": 64854
+  },
+  "title:history": {
+   "hits": 10,
+   "p50_us": 92,
+   "p95_us": 95,
+   "p99_us": 95
+  },
+  "(king OR queen) AND england": {
+   "hits": 10,
+   "p50_us": 1986,
+   "p95_us": 2091,
+   "p99_us": 2091
+  },
+  "NOT war": {
+   "hits": 10,
+   "p50_us": 7615,
+   "p95_us": 7966,
+   "p99_us": 7966
+  },
+  "england": {
+   "hits": 10,
+   "p50_us": 578,
+   "p95_us": 645,
+   "p99_us": 645
+  }
+ },
+ "latency_merged_st": {
+  "history": {
+   "hits": 10,
+   "p50_us": 751,
+   "p95_us": 797,
+   "p99_us": 797
+  },
+  "city river": {
+   "hits": 10,
+   "p50_us": 656,
+   "p95_us": 700,
+   "p99_us": 700
+  },
+  "king AND queen": {
+   "hits": 10,
+   "p50_us": 1002,
+   "p95_us": 1457,
+   "p99_us": 1457
+  },
+  "king OR queen": {
+   "hits": 10,
+   "p50_us": 317,
+   "p95_us": 452,
+   "p99_us": 452
+  },
+  "\"united states\"": {
+   "hits": 10,
+   "p50_us": 6721,
+   "p95_us": 10325,
+   "p99_us": 10325
+  },
+  "\"world war\"": {
+   "hits": 10,
+   "p50_us": 1438,
+   "p95_us": 1588,
+   "p99_us": 1588
+  },
+  "hist*": {
+   "hits": 10,
+   "p50_us": 1412,
+   "p95_us": 1559,
+   "p99_us": 1559
+  },
+  "histroy~1": {
+   "hits": 4,
+   "p50_us": 60754,
+   "p95_us": 65991,
+   "p99_us": 65991
+  },
+  "title:history": {
+   "hits": 10,
+   "p50_us": 88,
+   "p95_us": 106,
+   "p99_us": 106
+  },
+  "(king OR queen) AND england": {
+   "hits": 10,
+   "p50_us": 1992,
+   "p95_us": 2423,
+   "p99_us": 2423
+  },
+  "NOT war": {
+   "hits": 10,
+   "p50_us": 7803,
+   "p95_us": 13071,
+   "p99_us": 13071
+  },
+  "england": {
+   "hits": 10,
+   "p50_us": 565,
+   "p95_us": 822,
+   "p99_us": 822
+  }
+ },
+ "sqlite_index_s": 11.59962797164917,
+ "sqlite_bytes": 249135104,
+ "sqlite_queries": {
+  "history": 294.9237823486328,
+  "city river": 203.84788513183594,
+  "king AND queen": 134.94491577148438,
+  "king OR queen": 81.53915405273438,
+  "\"united states\"": 148.773193359375,
+  "\"world war\"": 141.8590545654297,
+  "hist*": 1827.0015716552734,
+  "histroy~1": 47.44529724121094,
+  "title:history": 96.79794311523438,
+  "(king OR queen) AND england": 170.9461212158203,
+  "NOT war": 62.22724914550781,
+  "england": 53.16734313964844
+ },
+ "tantivy_index_s": 3.42,
+ "tantivy_queries": {
+  "history": 394,
+  "city river": 681,
+  "king AND queen": 466,
+  "king OR queen": 317,
+  "\"united states\"": 2525,
+  "\"world war\"": 619,
+  "hist*": 36,
+  "histroy~1": 18,
+  "title:history": 12,
+  "(king OR queen) AND england": 563,
+  "NOT war": 0,
+  "england": 131
+ }
+}

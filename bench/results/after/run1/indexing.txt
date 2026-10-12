@@ -1,0 +1,1 @@
+indexed 100000 documents in 138.70s (721 docs/s)

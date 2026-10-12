@@ -1,0 +1,10 @@
+live_docs:     100000
+segments:      100
+buffered_docs: 0
+postings:      64589393 bytes
+term dict:     10381629 bytes
+live_docs:     100000
+segments:      1
+buffered_docs: 0
+postings:      57662480 bytes
+term dict:     2657296 bytes

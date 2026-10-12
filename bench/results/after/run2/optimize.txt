@@ -1,0 +1,6 @@
+merged in 99 rounds, 128.1s
+live_docs:     100000
+segments:      1
+buffered_docs: 0
+postings:      57662480 bytes
+term dict:     2657296 bytes
